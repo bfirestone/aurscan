@@ -1,7 +1,3 @@
-// Wired into the CLI surface by a later task in this epic; the public API
-// here is exercised only by this module's tests until then.
-#![allow(dead_code)]
-
 use aurscan_core::AurMetadata;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -68,10 +64,15 @@ fn fetch(names: &[&str]) -> anyhow::Result<Vec<AurInfo>> {
 /// Look up AUR metadata for a set of package names, keyed by package name.
 /// Packages that don't exist in the AUR (e.g. repo packages) are simply
 /// absent from the returned map.
+// Not called by this task's `check`/`install` flow (they only need the BFS
+// dependency walk in `resolve_aur_deps`); kept for a later task that needs a
+// flat, non-recursive lookup.
+#[allow(dead_code)]
 pub fn info(names: &[&str]) -> anyhow::Result<HashMap<String, AurInfo>> {
     info_with(names, fetch)
 }
 
+#[allow(dead_code)]
 fn info_with(
     names: &[&str],
     fetch_fn: impl Fn(&[&str]) -> anyhow::Result<Vec<AurInfo>>,

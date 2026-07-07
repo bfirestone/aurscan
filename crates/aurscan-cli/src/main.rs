@@ -2,6 +2,9 @@ mod ack;
 mod aur_rpc;
 mod cli;
 mod config;
+mod fetch;
+mod flow;
+mod gate;
 mod registry;
 mod report;
 
@@ -16,12 +19,26 @@ fn main() {
 
     let code = match cli.cmd {
         Cmd::Check { targets, hook } => {
-            let _ = hook;
-            run_check(&targets, &cfg, cli.json, cli.no_color, cli.verbose)
+            let (paths, names): (Vec<String>, Vec<String>) = targets
+                .into_iter()
+                .partition(|t| std::path::Path::new(t).exists());
+
+            let path_code = if paths.is_empty() {
+                0
+            } else {
+                run_check(&paths, &cfg, cli.json, cli.no_color, cli.verbose)
+            };
+            let name_code = if names.is_empty() {
+                0
+            } else {
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                flow::run_check_names(&refs, &cfg, hook, cli.json, cli.no_color, cli.verbose)
+            };
+            path_code.max(name_code)
         }
         Cmd::Install { packages, allow } => {
-            let _ = (packages, allow);
-            not_implemented("install")
+            let refs: Vec<&str> = packages.iter().map(String::as_str).collect();
+            flow::run_install(&refs, &allow, &cfg, cli.json, cli.no_color, cli.verbose)
         }
         Cmd::ScanArtifact { packages } => {
             let _ = packages;
@@ -38,19 +55,8 @@ fn main() {
     std::process::exit(code);
 }
 
-fn run_check(targets: &[String], cfg: &Config, json: bool, no_color: bool, verbose: bool) -> i32 {
-    let mut paths = Vec::new();
-    for t in targets {
-        if std::path::Path::new(t).exists() {
-            paths.push(t.clone());
-        } else {
-            eprintln!(
-                "note: '{t}' is not a local path; name-based check requires the RPC/fetch flow (not yet wired)"
-            );
-        }
-    }
-
-    let (reports, code) = match registry::run_check(&paths, cfg) {
+fn run_check(paths: &[String], cfg: &Config, json: bool, no_color: bool, verbose: bool) -> i32 {
+    let (reports, code) = match registry::run_check(paths, cfg) {
         Ok(result) => result,
         Err(e) => {
             eprintln!("error: {e:#}");
