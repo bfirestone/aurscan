@@ -1,0 +1,14 @@
+[package]
+name = "aurscan-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+rayon.workspace = true
+blake3.workspace = true
+tar.workspace = true
+zstd.workspace = true
+walkdir.workspace = true

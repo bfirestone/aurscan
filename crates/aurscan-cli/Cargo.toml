@@ -1,0 +1,24 @@
+[package]
+name = "aurscan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "aurscan"
+path = "src/main.rs"
+
+[dependencies]
+aurscan-core = { path = "../aurscan-core" }
+aurscan-detectors = { path = "../aurscan-detectors" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+clap.workspace = true
+ureq.workspace = true
+dirs.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,10 @@
+pub mod aur_metadata;
+pub mod archive_layout;
+pub mod elf_inspect;
+pub mod ioc_tokens;
+pub mod known_bad_names;
+pub mod payload_hashes;
+pub mod persistence;
+pub mod pkgbuild_static;
+pub mod rules;
+pub mod source_provenance;
