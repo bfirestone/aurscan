@@ -59,19 +59,76 @@ fn parse_srcinfo_lines(content: &str) -> Vec<KeyValue> {
     out
 }
 
+/// Strip a trailing `# comment` from a PKGBUILD line fragment, being careful
+/// not to treat a `#` inside quotes as a comment marker. Since URLs never
+/// legitimately contain a literal `#` fragment marker in these arrays and
+/// entries are always quoted, a simple quote-aware scan is sufficient.
+fn strip_inline_comment(fragment: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (byte_idx, ch) in fragment.char_indices() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double => return &fragment[..byte_idx],
+            _ => {}
+        }
+    }
+    fragment
+}
+
+/// Split a source-array fragment into individual quoted/unquoted entries,
+/// stripping surrounding quotes and whitespace.
+fn split_array_entries(fragment: &str) -> impl Iterator<Item = &str> {
+    fragment.split_whitespace().filter_map(|entry| {
+        let entry = entry.trim_matches(|c| c == '"' || c == '\'');
+        if entry.is_empty() {
+            None
+        } else {
+            Some(entry)
+        }
+    })
+}
+
 /// Cheap line-regex extraction of `url=` and `source=(...)` arrays from a
 /// PKGBUILD, since PKGBUILD is bash and we don't want to run a shell parser
-/// just to pull out source URLs.
+/// just to pull out source URLs. `source`/`source_<arch>` arrays commonly
+/// span multiple lines, so this tracks a small "inside source array" state
+/// from the opening `(` to its matching closing `)`, accumulating entries
+/// (and skipping `# comment` lines/fragments) along the way.
 fn parse_pkgbuild_lines(content: &str) -> Vec<KeyValue> {
     let mut out = Vec::new();
+    let mut in_source_array = false;
+
     for (idx, line) in content.lines().enumerate() {
+        let line_no = idx + 1;
         let trimmed = line.trim();
+
+        if in_source_array {
+            let fragment = strip_inline_comment(trimmed).trim();
+            let (fragment, closed) = match fragment.strip_suffix(')') {
+                Some(rest) => (rest, true),
+                None => (fragment, false),
+            };
+            for entry in split_array_entries(fragment) {
+                out.push(KeyValue {
+                    line_no,
+                    key: "source".to_string(),
+                    value: entry.to_string(),
+                });
+            }
+            if closed {
+                in_source_array = false;
+            }
+            continue;
+        }
+
         if let Some(rest) = trimmed.strip_prefix("url").map(str::trim_start) {
             if let Some(value) = rest.strip_prefix('=') {
                 out.push(KeyValue {
-                    line_no: idx + 1,
+                    line_no,
                     key: "url".to_string(),
-                    value: value
+                    value: strip_inline_comment(value.trim())
                         .trim()
                         .trim_matches(|c| c == '"' || c == '\'')
                         .to_string(),
@@ -89,18 +146,31 @@ fn parse_pkgbuild_lines(content: &str) -> Vec<KeyValue> {
         if key != "source" && !key.starts_with("source_") {
             continue;
         }
-        let rhs = trimmed[eq_idx + 1..].trim();
-        let inner = rhs.trim_start_matches('(').trim_end_matches(')');
-        for entry in inner.split_whitespace() {
-            let entry = entry.trim_matches(|c| c == '"' || c == '\'');
-            if entry.is_empty() {
-                continue;
+        let rhs = strip_inline_comment(trimmed[eq_idx + 1..].trim()).trim();
+        let Some(inner) = rhs.strip_prefix('(') else {
+            // Scalar assignment without an array, e.g. `source=http://...`.
+            for entry in split_array_entries(rhs) {
+                out.push(KeyValue {
+                    line_no,
+                    key: "source".to_string(),
+                    value: entry.to_string(),
+                });
             }
+            continue;
+        };
+        let (inner, closed) = match inner.strip_suffix(')') {
+            Some(rest) => (rest, true),
+            None => (inner, false),
+        };
+        for entry in split_array_entries(inner) {
             out.push(KeyValue {
-                line_no: idx + 1,
+                line_no,
                 key: "source".to_string(),
                 value: entry.to_string(),
             });
+        }
+        if !closed {
+            in_source_array = true;
         }
     }
     out
@@ -440,6 +510,71 @@ mod tests {
     fn named_source_splits_on_double_colon() {
         let r = scan_srcinfo(
             "pkgbase = x\n\tsource = payload.tar.gz::http://203.0.113.7/payload.tar.gz\n",
+        );
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.severity >= Severity::High && f.reason.contains("raw IP")));
+    }
+
+    #[test]
+    fn pkgbuild_multiline_source_array_flags_raw_ip_on_continuation_line() {
+        let r = scan_pkgbuild(
+            "pkgname=x\nurl=\"https://example.com\"\nsource=(\n  \"https://github.com/o/r/archive/v1.tar.gz\"\n  \"http://203.0.113.7/evil.tar.gz\"\n)\n",
+        );
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.severity >= Severity::High && f.reason.contains("raw IP")));
+    }
+
+    #[test]
+    fn pkgbuild_multiline_source_array_clean_github_no_findings() {
+        let r = scan_pkgbuild(
+            "pkgname=x\nurl=\"https://github.com/o/r\"\nsource=(\n  \"https://github.com/o/r/archive/v1.tar.gz\"\n  \"https://github.com/o/r/archive/v2.tar.gz\"\n)\n",
+        );
+        assert!(r.findings.is_empty());
+    }
+
+    #[test]
+    fn pkgbuild_single_line_source_array_still_works() {
+        let r = scan_pkgbuild(
+            "pkgname=x\nurl=\"https://example.com\"\nsource=('http://203.0.113.7/payload.tar.gz')\n",
+        );
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.severity >= Severity::High && f.reason.contains("raw IP")));
+    }
+
+    #[test]
+    fn pkgbuild_multiline_source_array_with_comment_line_still_parses_entries() {
+        let r = scan_pkgbuild(
+            "pkgname=x\nurl=\"https://example.com\"\nsource=(\n  # payload\n  \"http://203.0.113.7/evil.tar.gz\"\n  # trailer comment\n)\n",
+        );
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.severity >= Severity::High && f.reason.contains("raw IP")));
+    }
+
+    #[test]
+    fn pkgbuild_multiline_source_array_closing_paren_with_trailing_comment_still_closes() {
+        let r = scan_pkgbuild(
+            "pkgname=x\nurl=\"https://github.com/o/r\"\nsource=(\n  \"https://github.com/o/r/archive/v1.tar.gz\"\n) # end of sources\nsource_x86_64=('http://203.0.113.7/evil.tar.gz')\n",
+        );
+        let finding = r
+            .findings
+            .iter()
+            .find(|f| f.severity >= Severity::High && f.reason.contains("raw IP"))
+            .expect("expected a raw IP finding");
+        assert_eq!(finding.evidence.excerpt, "http://203.0.113.7/evil.tar.gz");
+    }
+
+    #[test]
+    fn pkgbuild_scalar_source_without_parens_still_flags_raw_ip() {
+        let r = scan_pkgbuild(
+            "pkgname=x\nurl=\"https://example.com\"\nsource=http://203.0.113.7/payload.tar.gz\n",
         );
         assert!(r
             .findings
