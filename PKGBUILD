@@ -10,6 +10,12 @@ depends=('pacman')
 optdepends=('paru: for paru-native PreBuildCommand integration')
 makedepends=('cargo' 'git')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+# SECURITY: 'SKIP' is a placeholder for the unreleased v0.1.0 state only.
+# Before publishing to the AUR, pin the real release-tarball checksum:
+#   makepkg -g >> PKGBUILD   # then replace the SKIP entry
+# Shipping a released package with SKIP defeats makepkg's source-integrity
+# check — the exact supply-chain gap this tool exists to catch. See the
+# bootstrap-trust note in README.md.
 sha256sums=('SKIP')
 
 build() {
