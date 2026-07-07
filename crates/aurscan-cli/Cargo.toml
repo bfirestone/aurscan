@@ -23,3 +23,5 @@ walkdir.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tar.workspace = true
+zstd.workspace = true

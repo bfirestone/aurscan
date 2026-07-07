@@ -1,0 +1,12 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Scanning packages for known AUR malware...
+When = PreTransaction
+Exec = /usr/bin/aurscan scan-artifact --hook
+NeedsTargets
+AbortOnFail

@@ -32,7 +32,13 @@ pub enum Cmd {
         allow: Vec<String>,
     },
     /// Scan already-built package archives.
-    ScanArtifact { packages: Vec<String> },
+    ScanArtifact {
+        packages: Vec<String>,
+        /// ALPM `PreTransaction` hook mode: read target archives/pkgnames
+        /// from stdin instead of `packages`.
+        #[arg(long)]
+        hook: bool,
+    },
     /// Audit an installed system for compromise artifacts.
     Audit {
         #[arg(long, default_value = "/")]

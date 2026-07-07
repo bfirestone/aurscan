@@ -1,13 +1,17 @@
 mod ack;
+mod artifact;
 mod aur_rpc;
 mod audit;
 mod cli;
 mod config;
+mod corpus;
 mod fetch;
 mod flow;
 mod gate;
+mod lists;
 mod registry;
 mod report;
+mod setup;
 
 use clap::Parser;
 use cli::{Cli, Cmd};
@@ -41,13 +45,29 @@ fn main() {
             let refs: Vec<&str> = packages.iter().map(String::as_str).collect();
             flow::run_install(&refs, &allow, &cfg, cli.json, cli.no_color, cli.verbose)
         }
-        Cmd::ScanArtifact { packages } => {
-            let _ = packages;
-            not_implemented("scan-artifact")
+        Cmd::ScanArtifact { packages, hook } => {
+            if hook {
+                artifact::hook_main()
+            } else {
+                let paths: Vec<std::path::PathBuf> = packages.into_iter().map(Into::into).collect();
+                artifact::scan_files(&paths, &cfg, cli.json, cli.no_color, cli.verbose)
+            }
         }
         Cmd::Audit { root } => audit::run_audit(std::path::Path::new(&root), &cfg),
-        Cmd::UpdateLists => not_implemented("update-lists"),
-        Cmd::Setup => not_implemented("setup"),
+        Cmd::UpdateLists => match lists::update() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("warning: {e:#}");
+                3
+            }
+        },
+        Cmd::Setup => match setup::run() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                3
+            }
+        },
     };
 
     std::process::exit(code);
@@ -62,6 +82,12 @@ fn run_check(paths: &[String], cfg: &Config, json: bool, no_color: bool, verbose
         }
     };
 
+    if cfg.record_features {
+        if let Some(data_dir) = dirs::data_dir() {
+            corpus::record(&reports, &data_dir);
+        }
+    }
+
     let acks = ack::AckStore::load();
     if json {
         let value = report::render_json(&reports);
@@ -72,9 +98,4 @@ fn run_check(paths: &[String], cfg: &Config, json: bool, no_color: bool, verbose
     }
 
     code
-}
-
-fn not_implemented(name: &str) -> ! {
-    eprintln!("aurscan {name}: not yet implemented");
-    std::process::exit(3);
 }
