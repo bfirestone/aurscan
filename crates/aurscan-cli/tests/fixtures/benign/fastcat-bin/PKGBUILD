@@ -1,0 +1,17 @@
+# Benign fixture: a minimal single-binary `-bin` package.
+pkgname=fastcat-bin
+pkgver=0.9.2
+pkgrel=1
+pkgdesc="A fast file concatenator (precompiled)"
+arch=('x86_64')
+url="https://github.com/example/fastcat"
+license=('MIT')
+provides=('fastcat')
+conflicts=('fastcat')
+source=("https://github.com/example/fastcat/releases/download/v0.9.2/fastcat-0.9.2-x86_64.tar.gz")
+sha256sums=('e5f60718293a4b5c6d7e8f901a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d')
+
+package() {
+  cd "$srcdir/fastcat-0.9.2-x86_64"
+  install -Dm755 fastcat "$pkgdir/usr/bin/fastcat"
+}

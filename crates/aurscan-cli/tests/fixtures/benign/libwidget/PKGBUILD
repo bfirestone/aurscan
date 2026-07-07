@@ -1,0 +1,25 @@
+# Benign fixture: a plain source build (autotools/make), modeled on ordinary
+# library packages. Release tarball over HTTPS from a known host, standard
+# configure/make, and a DESTDIR install into $pkgdir.
+pkgname=libwidget
+pkgver=2.4.1
+pkgrel=1
+pkgdesc="A small widget rendering library"
+arch=('x86_64')
+url="https://gitlab.com/example/libwidget"
+license=('LGPL')
+depends=('glibc')
+makedepends=('gcc' 'make')
+source=("https://gitlab.com/example/libwidget/-/archive/v2.4.1/libwidget-v2.4.1.tar.gz")
+sha256sums=('c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f708192a3b4c5d6e7f8091a2b')
+
+build() {
+  cd "$srcdir/libwidget-v$pkgver"
+  ./configure --prefix=/usr
+  make
+}
+
+package() {
+  cd "$srcdir/libwidget-v$pkgver"
+  make DESTDIR="$pkgdir" install
+}

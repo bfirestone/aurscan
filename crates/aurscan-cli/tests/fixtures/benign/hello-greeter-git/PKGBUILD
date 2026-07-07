@@ -1,0 +1,32 @@
+# Benign fixture: a `-git` VCS package (modeled on typical `*-git` recipes).
+# `git+https` source, a standard VCS `pkgver()`, a compile step, and a clean
+# $pkgdir install. Network access is confined to source=() and pkgver(), which
+# is expected and not out-of-band.
+pkgname=hello-greeter-git
+pkgver=r120.abc1234
+pkgrel=1
+pkgdesc="A friendly command-line greeter (VCS)"
+arch=('x86_64')
+url="https://github.com/example/hello-greeter"
+license=('Apache')
+makedepends=('git' 'go')
+provides=('hello-greeter')
+conflicts=('hello-greeter')
+source=("git+https://github.com/example/hello-greeter.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/hello-greeter"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$srcdir/hello-greeter"
+  go build -o hello-greeter ./cmd/greeter
+}
+
+package() {
+  cd "$srcdir/hello-greeter"
+  install -Dm755 hello-greeter "$pkgdir/usr/bin/hello-greeter"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

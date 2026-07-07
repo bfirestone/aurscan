@@ -1,0 +1,18 @@
+# Benign fixture: a data-only package (a GTK theme), modeled on the many
+# theme/icon AUR packages. No build step; just copies data into $pkgdir.
+pkgname=miniplayer-theme
+pkgver=1.0
+pkgrel=1
+pkgdesc="A minimal GTK theme"
+arch=('any')
+url="https://github.com/example/miniplayer-theme"
+license=('CC-BY-SA')
+source=("https://github.com/example/miniplayer-theme/archive/v1.0.tar.gz")
+sha256sums=('d4e5f60718293a4b5c6d7e8f901a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c')
+
+package() {
+  cd "$srcdir/miniplayer-theme-$pkgver"
+  install -dm755 "$pkgdir/usr/share/themes"
+  cp -r Miniplayer "$pkgdir/usr/share/themes/"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

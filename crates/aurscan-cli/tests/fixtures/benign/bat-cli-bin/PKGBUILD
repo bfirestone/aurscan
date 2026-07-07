@@ -1,0 +1,22 @@
+# Benign fixture: precompiled CLI with shell-completion installs, all under
+# $pkgdir. Sources from a GitHub release over HTTPS.
+pkgname=bat-cli-bin
+pkgver=0.24.0
+pkgrel=1
+pkgdesc="A cat clone with syntax highlighting (precompiled)"
+arch=('x86_64')
+url="https://github.com/sharkdp/bat"
+license=('MIT' 'Apache')
+provides=('bat')
+conflicts=('bat')
+depends=('glibc')
+source=("https://github.com/sharkdp/bat/releases/download/v0.24.0/bat-v0.24.0-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums=('b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f901')
+
+package() {
+  cd "$srcdir/bat-v0.24.0-x86_64-unknown-linux-gnu"
+  install -Dm755 bat "$pkgdir/usr/bin/bat"
+  install -Dm644 autocomplete/bat.bash "$pkgdir/usr/share/bash-completion/completions/bat"
+  install -Dm644 autocomplete/bat.zsh "$pkgdir/usr/share/zsh/site-functions/_bat"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+}

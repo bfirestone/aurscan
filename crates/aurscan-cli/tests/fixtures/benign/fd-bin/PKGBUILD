@@ -1,0 +1,19 @@
+# Benign fixture: another precompiled `-bin` package with a GitHub release
+# tarball and clean $pkgdir installs.
+pkgname=fd-bin
+pkgver=10.1.0
+pkgrel=1
+pkgdesc="A simple, fast alternative to find (precompiled)"
+arch=('x86_64')
+url="https://github.com/sharkdp/fd"
+license=('MIT' 'Apache')
+provides=('fd')
+conflicts=('fd')
+source=("https://github.com/sharkdp/fd/releases/download/v10.1.0/fd-v10.1.0-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums=('a54f2c6b8f2f0f1b0e5d1d3f2a1b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b')
+
+package() {
+  cd "$srcdir/fd-v10.1.0-x86_64-unknown-linux-gnu"
+  install -Dm755 fd "$pkgdir/usr/bin/fd"
+  install -Dm644 fd.1 "$pkgdir/usr/share/man/man1/fd.1"
+}

@@ -1,0 +1,9 @@
+# Root-time install hook that enables a background daemon — caught by
+# pkgbuild_static's daemon-spawning-install-hook heuristic, not any signature.
+post_install() {
+  systemctl enable --now sysmetrics-agent.service
+}
+
+post_upgrade() {
+  post_install
+}

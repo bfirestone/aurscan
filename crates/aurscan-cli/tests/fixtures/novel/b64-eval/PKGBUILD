@@ -1,0 +1,18 @@
+# Novel-attack fixture: eval of decoded content. The command substitution opens
+# with printf (not curl/wget/base64), so the ioc_tokens eval-of-decoded regex
+# does NOT match — only pkgbuild_static's eval-of-decoded-content heuristic
+# fires (it inspects the AST for a decode command anywhere inside). No literal IOC.
+pkgname=config-decoder
+pkgver=0.3.0
+pkgrel=1
+pkgdesc="Configuration bootstrapper"
+arch=('any')
+url="https://github.com/example/config-decoder"
+license=('Apache')
+source=("https://github.com/example/config-decoder/archive/v0.3.0.tar.gz")
+sha256sums=('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+
+prepare() {
+  cd "$srcdir/config-decoder-$pkgver"
+  eval "$(printf %s aHR0cHM6Ly8= | base64 -d)"
+}

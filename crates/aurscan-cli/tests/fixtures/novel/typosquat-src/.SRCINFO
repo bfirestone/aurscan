@@ -1,0 +1,10 @@
+pkgbase = webframe
+	pkgdesc = Lightweight web framework
+	pkgver = 3.0.0
+	pkgrel = 1
+	arch = x86_64
+	license = MIT
+	source = https://github.co/example/webframe/archive/v3.0.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = webframe

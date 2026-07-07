@@ -1,0 +1,19 @@
+# Regression fixture: the package name itself is on the confirmed-compromised
+# list, so known_bad_names matches Exactly and Blocks regardless of an
+# otherwise clean-looking build recipe. The scanned package identity comes from
+# the directory name, so this fixture lives under `runescape-launcher/`.
+pkgname=runescape-launcher
+pkgver=2.1.0
+pkgrel=1
+pkgdesc="Game launcher (name on the compromised list)"
+arch=('x86_64')
+url="https://github.com/example/runescape-launcher"
+license=('custom')
+depends=('gtk3')
+source=("https://github.com/example/runescape-launcher/releases/download/v2.1.0/runescape-launcher-2.1.0-x86_64.tar.gz")
+sha256sums=('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+
+package() {
+  cd "$srcdir/runescape-launcher-$pkgver"
+  install -Dm755 runescape-launcher "$pkgdir/usr/bin/runescape-launcher"
+}
