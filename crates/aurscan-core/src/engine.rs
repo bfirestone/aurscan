@@ -115,7 +115,9 @@ mod tests {
                     path: pkgbuild,
                     kind: ScriptKind::Pkgbuild,
                 },
-                ScanTarget::HostArtifact { path: host_artifact },
+                ScanTarget::HostArtifact {
+                    path: host_artifact,
+                },
             ],
         };
 

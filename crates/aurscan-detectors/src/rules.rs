@@ -196,7 +196,10 @@ mod tests {
         assert_eq!(rs.hashes.len(), 3);
         assert!(rs.bad_names.contains("runescape-launcher"));
         assert!(rs.bad_names.len() > 500);
-        assert!(rs.regexes.iter().all(|r| regex::Regex::new(&r.pattern).is_ok()));
+        assert!(rs
+            .regexes
+            .iter()
+            .all(|r| regex::Regex::new(&r.pattern).is_ok()));
     }
 
     #[test]

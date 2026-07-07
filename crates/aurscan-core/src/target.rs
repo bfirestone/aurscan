@@ -14,7 +14,10 @@ const MAX_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 /// `exclude` names are given (the check flow passes source filenames).
 pub fn expand_build_dir(dir: &Path, exclude: &[String]) -> Vec<ScanTarget> {
     let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
         let p = entry.path();
         if !entry.file_type().is_file() {
             continue;
@@ -31,7 +34,11 @@ pub fn expand_build_dir(dir: &Path, exclude: &[String]) -> Vec<ScanTarget> {
             _ if name.ends_with(".install") => ScriptKind::InstallScript,
             _ if name == ".SRCINFO" => ScriptKind::SrcInfo,
             _ if name.ends_with(".patch") || name.ends_with(".diff") => ScriptKind::Patch,
-            _ if entry.metadata().map(|m| m.len() < 1_048_576).unwrap_or(false) => {
+            _ if entry
+                .metadata()
+                .map(|m| m.len() < 1_048_576)
+                .unwrap_or(false) =>
+            {
                 ScriptKind::Other
             }
             _ => continue,
@@ -157,7 +164,8 @@ mod tests {
         h.set_size(9);
         h.set_mode(0o644);
         h.set_cksum();
-        ar.append_data(&mut h, ".PKGINFO", &b"pkgname=x"[..]).unwrap();
+        ar.append_data(&mut h, ".PKGINFO", &b"pkgname=x"[..])
+            .unwrap();
         ar.finish().unwrap();
         (dir, path)
     }

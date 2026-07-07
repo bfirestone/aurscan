@@ -8,7 +8,12 @@ use std::fmt::Write;
 
 /// Human-readable, severity-sorted report. `Info` findings ride along only when
 /// `verbose`; acknowledged findings are suppressed and summarized instead.
-pub fn render_text(reports: &[PackageReport], acks: &AckStore, verbose: bool, color: bool) -> String {
+pub fn render_text(
+    reports: &[PackageReport],
+    acks: &AckStore,
+    verbose: bool,
+    color: bool,
+) -> String {
     let mut out = String::new();
     for report in reports {
         let _ = writeln!(out, "{}: {}", report.package, verdict_name(&report.verdict));
@@ -167,7 +172,11 @@ mod tests {
 
     #[test]
     fn acked_finding_is_filtered_from_text() {
-        let f = finding(Severity::High, "malicious token", "npm install atomic-lockfile");
+        let f = finding(
+            Severity::High,
+            "malicious token",
+            "npm install atomic-lockfile",
+        );
         let rep = report("pkg", Verdict::Block(vec![f.clone()]), vec![f.clone()]);
         let acks = AckStore::from_keys([AckStore::key(&f)]);
 

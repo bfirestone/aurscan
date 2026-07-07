@@ -30,7 +30,10 @@ fn paru_conf_path() -> anyhow::Result<PathBuf> {
 fn setup_paru_conf(path: &Path) -> anyhow::Result<()> {
     let existing = std::fs::read_to_string(path).unwrap_or_default();
     if existing.contains(PARU_SNIPPET) {
-        println!("paru.conf: PreBuildCommand already present at {}, skipping", path.display());
+        println!(
+            "paru.conf: PreBuildCommand already present at {}, skipping",
+            path.display()
+        );
         return Ok(());
     }
 
@@ -45,7 +48,10 @@ fn setup_paru_conf(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     writeln!(file, "{PARU_SNIPPET}")?;
     println!("paru.conf: appended PreBuildCommand");
     Ok(())
@@ -55,7 +61,10 @@ fn setup_paru_conf(path: &Path) -> anyhow::Result<()> {
 /// print the exact `sudo install -Dm644` command instead of failing. Skips
 /// (idempotently) when `dest` already holds the current hook text.
 fn install_hook(dest: &Path) -> anyhow::Result<()> {
-    if std::fs::read_to_string(dest).map(|c| c == HOOK_TEXT).unwrap_or(false) {
+    if std::fs::read_to_string(dest)
+        .map(|c| c == HOOK_TEXT)
+        .unwrap_or(false)
+    {
         println!("alpm hook: already installed at {}", dest.display());
         return Ok(());
     }
@@ -146,6 +155,9 @@ mod tests {
         install_hook(&dest).unwrap();
 
         let after = std::fs::metadata(&dest).unwrap().modified().unwrap();
-        assert_eq!(before, after, "an up-to-date hook file must not be rewritten");
+        assert_eq!(
+            before, after,
+            "an up-to-date hook file must not be rewritten"
+        );
     }
 }

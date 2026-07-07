@@ -1,7 +1,7 @@
 mod ack;
 mod artifact;
-mod aur_rpc;
 mod audit;
+mod aur_rpc;
 mod cli;
 mod config;
 mod corpus;

@@ -1,5 +1,5 @@
-pub mod aur_metadata;
 pub mod archive_layout;
+pub mod aur_metadata;
 pub mod elf_inspect;
 pub mod ioc_tokens;
 pub mod known_bad_names;

@@ -28,7 +28,9 @@ pub fn compute_verdict(findings: Vec<Finding>, policy: &VerdictPolicy) -> Verdic
     let exact_critical = findings
         .iter()
         .any(|f| f.severity == Severity::Critical && f.confidence == Confidence::Exact);
-    let heuristic_block = findings.iter().any(|f| f.severity >= policy.block_heuristic_at);
+    let heuristic_block = findings
+        .iter()
+        .any(|f| f.severity >= policy.block_heuristic_at);
     let advisories: Vec<&Finding> = findings
         .iter()
         .filter(|f| f.severity >= policy.advisory_at)

@@ -3,7 +3,7 @@ use crate::types::DetectorId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    pub content_hash: [u8; 32],   // blake3 of target content
+    pub content_hash: [u8; 32], // blake3 of target content
     pub detector: DetectorId,
     pub ruleset_version: u32,
 }
@@ -17,6 +17,8 @@ pub trait ResultCache: Send + Sync {
 pub struct NoopCache;
 
 impl ResultCache for NoopCache {
-    fn get(&self, _key: &CacheKey) -> Option<DetectorResult> { None }
+    fn get(&self, _key: &CacheKey) -> Option<DetectorResult> {
+        None
+    }
     fn put(&self, _key: &CacheKey, _result: &DetectorResult) {}
 }

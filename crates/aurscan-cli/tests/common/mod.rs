@@ -124,7 +124,9 @@ fn run(rel: &str, cache_home: &std::path::Path, isolate_home: &std::path::Path) 
     let mut verdicts = Vec::new();
     let mut findings = Vec::new();
     for report in &reports {
-        verdicts.push(Verdict::parse(report["verdict"].as_str().unwrap_or("clean")));
+        verdicts.push(Verdict::parse(
+            report["verdict"].as_str().unwrap_or("clean"),
+        ));
         for f in report["findings"].as_array().into_iter().flatten() {
             findings.push(Finding {
                 severity: Severity::parse(f["severity"].as_str().unwrap_or("info")),

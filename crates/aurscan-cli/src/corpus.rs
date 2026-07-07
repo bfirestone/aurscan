@@ -46,7 +46,11 @@ fn append_line(dir: &Path, schema_version: u16, line: &CorpusLine) {
         return;
     };
     let path = dir.join(format!("features-{schema_version}.jsonl"));
-    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
         return;
     };
     let _ = writeln!(file, "{json}");

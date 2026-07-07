@@ -64,7 +64,10 @@ pub fn read_local_db(root: &Path) -> anyhow::Result<Vec<ForeignPkg>> {
             continue;
         }
 
-        let name = fields.get("NAME").map(|v| v.trim().to_string()).unwrap_or_default();
+        let name = fields
+            .get("NAME")
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
         if name.is_empty() {
             continue;
         }
@@ -77,7 +80,10 @@ pub fn read_local_db(root: &Path) -> anyhow::Result<Vec<ForeignPkg>> {
 
         pkgs.push(ForeignPkg {
             name,
-            version: fields.get("VERSION").map(|v| v.trim().to_string()).unwrap_or_default(),
+            version: fields
+                .get("VERSION")
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default(),
             install_date,
         });
     }
@@ -212,7 +218,10 @@ pub fn host_artifact_targets(root: &Path) -> Vec<ScanTarget> {
         if !hroot.is_dir() {
             continue;
         }
-        for entry in walkdir::WalkDir::new(&hroot).into_iter().filter_map(Result::ok) {
+        for entry in walkdir::WalkDir::new(&hroot)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             if entry.file_type().is_file() {
                 targets.push(ScanTarget::HostArtifact {
                     path: entry.path().to_path_buf(),

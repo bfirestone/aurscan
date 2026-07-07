@@ -41,8 +41,7 @@ const INSTALL_HOOK_FNS: &[&str] = &[
 /// Phases where a spawned daemon in an install hook is high-risk.
 const DAEMON_PHASES: &[&str] = &["post_install", "post_upgrade"];
 /// Substrings that mark a destination path as a legitimate build target.
-const SAFE_DEST_MARKERS: &[&str] =
-    &["$pkgdir", "${pkgdir}", "$srcdir", "${srcdir}", "/tmp"];
+const SAFE_DEST_MARKERS: &[&str] = &["$pkgdir", "${pkgdir}", "$srcdir", "${srcdir}", "/tmp"];
 
 pub struct PkgbuildStaticDetector {
     lang: tree_sitter::Language,
@@ -175,11 +174,7 @@ impl Features {
         } else {
             self.string_entropies.iter().sum::<f32>() / self.string_entropies.len() as f32
         };
-        let max_entropy = self
-            .string_entropies
-            .iter()
-            .copied()
-            .fold(0.0f32, f32::max);
+        let max_entropy = self.string_entropies.iter().copied().fold(0.0f32, f32::max);
         let has_hook = self.has_install_hook || matches!(kind, ScriptKind::InstallScript);
         let file_len = src.len() as u32;
         let max_line = src.lines().map(|l| l.len()).max().unwrap_or(0) as u32;
@@ -419,7 +414,9 @@ impl<'a> Walker<'a> {
                     let scope = cur_fn.unwrap_or("script");
                     self.push(
                         Severity::High,
-                        format!("`{name}` writes to system path {arg} outside build dirs in {scope}()"),
+                        format!(
+                            "`{name}` writes to system path {arg} outside build dirs in {scope}()"
+                        ),
                         node,
                     );
                     break;
@@ -471,8 +468,7 @@ impl<'a> Walker<'a> {
             .map(|s| s.kind() == "&")
             .unwrap_or(false);
         let is_daemon = matches!(name, "nohup" | "setsid" | "disown")
-            || (name == "systemctl"
-                && args.iter().any(|a| matches!(*a, "enable" | "start")))
+            || (name == "systemctl" && args.iter().any(|a| matches!(*a, "enable" | "start")))
             || backgrounded;
         if is_daemon {
             let scope = cur_fn.unwrap_or("script");

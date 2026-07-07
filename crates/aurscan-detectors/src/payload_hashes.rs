@@ -57,7 +57,9 @@ impl Detector for PayloadHashesDetector {
     fn wants(&self, target: &ScanTarget) -> bool {
         matches!(
             target,
-            ScanTarget::SourceFile { .. } | ScanTarget::PackageFile { .. } | ScanTarget::HostArtifact { .. }
+            ScanTarget::SourceFile { .. }
+                | ScanTarget::PackageFile { .. }
+                | ScanTarget::HostArtifact { .. }
         )
     }
 

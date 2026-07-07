@@ -3,27 +3,42 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Severity { Info, Medium, High, Critical }
+pub enum Severity {
+    Info,
+    Medium,
+    High,
+    Critical,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
-    Exact,          // hash / literal IOC match
-    Heuristic,      // rule-based inference
-    Model(f32),     // phase-2 ONNX score in [0,1]
+    Exact,      // hash / literal IOC match
+    Heuristic,  // rule-based inference
+    Model(f32), // phase-2 ONNX score in [0,1]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ScriptKind { Pkgbuild, InstallScript, SrcInfo, Patch, Other }
+pub enum ScriptKind {
+    Pkgbuild,
+    InstallScript,
+    SrcInfo,
+    Patch,
+    Other,
+}
 
 #[derive(Debug, Clone, Serialize)]
-pub enum SourceOrigin { Url(String), LocalFile, Vcs(String) }
+pub enum SourceOrigin {
+    Url(String),
+    LocalFile,
+    Vcs(String),
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub enum ScanTarget {
     BuildScript { path: PathBuf, kind: ScriptKind },
-    SourceFile  { path: PathBuf, origin: SourceOrigin },
+    SourceFile { path: PathBuf, origin: SourceOrigin },
     PackageFile { archive: PathBuf, member: String },
     HostArtifact { path: PathBuf },
 }
@@ -33,8 +48,8 @@ pub struct DetectorId(pub &'static str);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Evidence {
-    pub location: String,        // "path:line" or "archive!member@offset"
-    pub excerpt: String,         // matched content, capped at 200 chars
+    pub location: String, // "path:line" or "archive!member@offset"
+    pub excerpt: String,  // matched content, capped at 200 chars
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,7 +73,11 @@ pub struct FeatureVector {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "lowercase", tag = "verdict", content = "findings")]
-pub enum Verdict { Clean, Advisory(Vec<Finding>), Block(Vec<Finding>) }
+pub enum Verdict {
+    Clean,
+    Advisory(Vec<Finding>),
+    Block(Vec<Finding>),
+}
 
 /// One package's scan input: metadata + the expanded targets to examine.
 #[derive(Debug, Clone)]
@@ -87,13 +106,19 @@ mod contract {
     use super::*;
 
     // Severity must be totally ordered for verdict thresholds.
-    const _: fn() = || { fn ord<T: Ord>() {} ord::<Severity>(); };
+    const _: fn() = || {
+        fn ord<T: Ord>() {}
+        ord::<Severity>();
+    };
 
     // Detector must be object-safe: the engine holds Vec<Box<dyn Detector>>.
     fn _assert_object_safe(_: &dyn crate::detector::Detector) {}
 
     // Finding must be Clone + Send for rayon fan-out.
-    const _: fn() = || { fn ok<T: Clone + Send>() {} ok::<Finding>(); };
+    const _: fn() = || {
+        fn ok<T: Clone + Send>() {}
+        ok::<Finding>();
+    };
 
     #[test]
     fn severity_ordering() {

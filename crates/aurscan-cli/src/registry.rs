@@ -144,7 +144,9 @@ mod tests {
 
         assert_eq!(code, 2, "a planted critical IOC token must block");
         assert!(
-            reports.iter().any(|r| matches!(r.verdict, Verdict::Block(_))),
+            reports
+                .iter()
+                .any(|r| matches!(r.verdict, Verdict::Block(_))),
             "expected a Block verdict"
         );
     }

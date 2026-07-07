@@ -10,8 +10,8 @@ pub struct DetectorResult {
 #[derive(Debug, Clone)]
 pub struct AurMetadata {
     pub maintainer: Option<String>,
-    pub first_submitted: i64,   // epoch
-    pub last_modified: i64,     // epoch
+    pub first_submitted: i64, // epoch
+    pub last_modified: i64,   // epoch
     pub out_of_date: Option<i64>,
     pub popularity: f64,
     pub num_votes: u32,
@@ -21,7 +21,7 @@ pub struct AurMetadata {
 pub struct ScanContext {
     pub package: String,
     pub version: String,
-    pub aur_meta: Option<AurMetadata>,   // None when offline / audit mode
+    pub aur_meta: Option<AurMetadata>, // None when offline / audit mode
 }
 
 pub trait Detector: Send + Sync {

@@ -19,7 +19,13 @@ const PACMAN_CACHE_DIR: &str = "/var/cache/pacman/pkg";
 /// `scan-artifact <pkg>...`: expand each built archive into `PackageFile`
 /// targets, scan them through the full engine, render, and return the worst
 /// exit code.
-pub fn scan_files(paths: &[PathBuf], cfg: &Config, json: bool, no_color: bool, verbose: bool) -> i32 {
+pub fn scan_files(
+    paths: &[PathBuf],
+    cfg: &Config,
+    json: bool,
+    no_color: bool,
+    verbose: bool,
+) -> i32 {
     let engine = match registry::build_engine(cfg) {
         Ok(e) => e,
         Err(e) => {

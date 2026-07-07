@@ -18,7 +18,10 @@ fn no_benign_fixture_is_blocked() {
             Verdict::Block,
             "benign fixture `{name}` was blocked (detector false positive)"
         );
-        assert_ne!(r.exit_code, 2, "benign fixture `{name}` exited with Block code 2");
+        assert_ne!(
+            r.exit_code, 2,
+            "benign fixture `{name}` exited with Block code 2"
+        );
     }
 }
 
