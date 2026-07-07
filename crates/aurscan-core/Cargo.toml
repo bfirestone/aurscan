@@ -7,11 +7,14 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 rayon.workspace = true
 blake3 = { workspace = true, features = ["mmap"] }
 tar.workspace = true
 zstd.workspace = true
 walkdir.workspace = true
+redb.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
