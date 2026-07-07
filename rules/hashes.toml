@@ -1,0 +1,13 @@
+version = 1
+
+[[hash]]
+sha256 = "6144d433f8a0316869877b5f834c801251bbb936e5f1577c5680878c7443c98b"
+label = "atomic-lockfile ELF payload (deps)"
+
+[[hash]]
+sha256 = "7883bda1ff15425f2dbe622c45a3ae105ddfa6175009bbf0b0cad9bf5c79b316"
+label = "js-digest ELF payload"
+
+[[hash]]
+sha256 = "47893d9badc38c54b71321263ce8178c1abb10396e0aadf9793e61ec8829e204"
+label = "atomic-lockfile cryptominer variant"

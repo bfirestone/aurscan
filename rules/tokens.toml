@@ -1,0 +1,21 @@
+version = 1
+
+[[token]]
+token = "atomic-lockfile"
+severity = "critical"
+label = "June 2026 malicious npm package"
+
+[[token]]
+token = "js-digest"
+severity = "critical"
+label = "June 2026 malicious bun package"
+
+[[token]]
+token = "npm install atomic-lockfile"
+severity = "critical"
+label = "June 2026 injection command"
+
+[[token]]
+token = "bun install js-digest"
+severity = "critical"
+label = "June 2026 injection command"
