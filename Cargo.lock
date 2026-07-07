@@ -92,6 +92,7 @@ dependencies = [
  "anyhow",
  "aurscan-core",
  "aurscan-detectors",
+ "blake3",
  "clap",
  "dirs",
  "serde",
