@@ -8,7 +8,10 @@ license.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 rayon.workspace = true
-blake3.workspace = true
+blake3 = { workspace = true, features = ["mmap"] }
 tar.workspace = true
 zstd.workspace = true
 walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
