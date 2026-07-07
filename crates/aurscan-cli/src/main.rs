@@ -1,5 +1,6 @@
 mod ack;
 mod aur_rpc;
+mod audit;
 mod cli;
 mod config;
 mod fetch;
@@ -44,10 +45,7 @@ fn main() {
             let _ = packages;
             not_implemented("scan-artifact")
         }
-        Cmd::Audit { root } => {
-            let _ = root;
-            not_implemented("audit")
-        }
+        Cmd::Audit { root } => audit::run_audit(std::path::Path::new(&root), &cfg),
         Cmd::UpdateLists => not_implemented("update-lists"),
         Cmd::Setup => not_implemented("setup"),
     };
