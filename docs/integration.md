@@ -1,0 +1,288 @@
+# paru & pacman Integration
+
+This document describes how `aurscan` integrates with paru (AUR helper) and pacman (package manager) to gate package installation at multiple stages.
+
+## Overview
+
+`aurscan setup` configures two integration points:
+
+1. **paru PreBuildCommand** — stage 1–2 gate (before PKGBUILD execution)
+2. **pacman hook** (ALPM PreTransaction) — stage 3 gate (before package installation)
+
+Together, they provide defense-in-depth: scanner runs before PKGBUILD code executes (where build-time attacks occur) and again before binaries are installed (catch late-stage modifications).
+
+## paru PreBuildCommand integration
+
+### What it does
+
+paru v2.1.0 (and later) supports a `PreBuildCommand` configuration in `paru.conf`. When set, paru runs this command in the PKGBUILD directory before `makepkg` executes each package, and also if the build is skipped as already-built.
+
+`aurscan setup` writes to `~/.config/aurscan/paru.conf.snippet`:
+
+```bash
+# paru.conf
+[options]
+PreBuildCommand = aurscan check --hook .
+```
+
+The `--hook` flag enables two behaviors:
+1. Stage 1: scan the PKGBUILD + .install scripts in the current directory
+2. Stage 2: run `makepkg --verifysource` (fetches sources, validates checksums, but executes no build code) and scan the fetched sources
+
+If findings Block, `aurscan` exits non-zero, aborting the package build. If Advisory, the hook prompts interactively (unless non-TTY); if allowed, paru continues.
+
+### paru.conf setup
+
+`aurscan setup` reads your paru.conf, appends the snippet, and writes it back:
+
+```bash
+aurscan setup
+```
+
+Idempotent: re-running it is safe.
+
+**Manual setup:** If you prefer, add this line to your `~/.config/paru/paru.conf`:
+
+```ini
+PreBuildCommand = aurscan check --hook .
+```
+
+### TOCTOU mitigation
+
+The `aurscan install` wrapper (secondary UX) records the git commit SHA of each scanned PKGBUILD. When the wrapper delegates to paru, paru's PreBuildCommand re-scans that same commit. If HEAD has changed, the hook warns about the mismatch and rechecks, ensuring we don't build a different version than scanned.
+
+This is not a guarantee (a compromised git repo can forge commits), but it catches accidental changes and some attack vectors.
+
+### Implementation notes
+
+**Verified behavior (paru v2.1.0):**
+- Non-zero exit from PreBuildCommand aborts paru's build of that package ✓
+- TTY is inherited: interactive prompts work in the hook ✓
+- `makepkg --verifysource` with VCS sources (e.g., `-git` packages) fetches `pkgver()` function results without executing the full build ✓
+
+**Multi-package builds:**
+If you install multiple packages (`paru -S pkg1 pkg2 pkg3`), paru runs PreBuildCommand for each. If one blocks, paru skips that package's build but continues with others (parallel/independent gating).
+
+## pacman hook integration
+
+### What it does
+
+The ALPM pacman hook at `/usr/share/libalpm/hooks/aurscan.hook` runs `aurscan scan-artifact --hook` on every package install/upgrade transaction (PreTransaction stage).
+
+The hook:
+- Runs before pacman modifies the filesystem
+- Reads the packages being installed from stdin (ALPM-provided format)
+- Filters to foreign (AUR) packages
+- Scans built binaries for payload hashes, setuid bits, suspicious archive layout
+- Exits non-zero if findings Block, aborting the transaction
+
+This is the stage 3 gate: it catches compromises that occurred during build but after PKGBUILD execution (e.g., build environment compromise, binary hijacking).
+
+### Hook location
+
+`aurscan setup` (or the AUR package) installs the hook to `/usr/share/libalpm/hooks/aurscan.hook`. This is the **system-owned** hook directory; pacman checks it for all transactions (users and admins).
+
+`aurscan setup` also creates a user-owned hook at `~/.config/pacman/hooks/aurscan.hook` (optional; the system hook is primary).
+
+### Hook file
+
+The hook is defined in `data/aurscan.hook` (checked into the repository, also installed by the AUR package):
+
+```ini
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = *
+
+[Action]
+Description = Scanning packages for known AUR malware...
+When = PreTransaction
+Exec = /usr/bin/aurscan scan-artifact --hook
+NeedsTargets
+AbortOnFail
+```
+
+**Fields:**
+- `Trigger` — fires on all Install and Upgrade operations
+- `When = PreTransaction` — runs before pacman touches the filesystem
+- `Exec = /usr/bin/aurscan scan-artifact --hook` — runs aurscan in hook mode (reads from stdin)
+- `NeedsTargets` — pacman provides the list of packages being installed
+- `AbortOnFail` — non-zero exit aborts the transaction
+
+### Helper-agnostic protection
+
+The hook is installed by the aurscan AUR package and runs for **all** package operations, regardless of which AUR helper (paru, yay, etc.) invoked pacman. This protects yay users (whose helper does not have PreBuildCommand support) and manual `pacman -U` operations.
+
+## Workflow diagram
+
+```text
+User: paru -S firefox aspell-en
+│
+├─ paru resolves AUR tree (RPC)
+├─ paru clones PKGBUILDs to ~/.cache/paru/clone/
+│
+├─ [paru PreBuildCommand per package]
+│  ├─ firefox: aurscan check --hook .
+│  │  ├─ stage 1: scan PKGBUILD (tree-sitter-bash AST, ioc_tokens, etc.)
+│  │  ├─ stage 2: makepkg --verifysource → scan sources (hash, elf_inspect, etc.)
+│  │  ├─ verdict: clean → continue
+│  │
+│  ├─ aspell-en: aurscan check --hook .
+│  │  ├─ stage 1, 2: ...
+│  │  ├─ verdict: advisory → prompt user y/N
+│  │  ├─ user allows → continue
+│
+├─ paru runs makepkg for each PKGBUILD (builds firefox-*.pkg.tar.zst, aspell-en-*.pkg.tar.zst)
+│
+├─ paru calls pacman -U firefox-*.pkg.tar.zst aspell-en-*.pkg.tar.zst
+│  │
+│  ├─ [ALPM PreTransaction hook]
+│  │  ├─ aurscan scan-artifact --hook (reads from stdin)
+│  │  ├─ stage 3: scan archive members (payload_hashes, elf_inspect, archive_layout, etc.)
+│  │  ├─ firefox: clean → allow
+│  │  ├─ aspell-en: advisory → block/prompt (depends on config)
+│  │  ├─ hook exits: if any block → abort transaction, otherwise allow
+│  │
+│  ├─ [pacman installs packages]
+```
+
+## Verdict logic & interactive prompts
+
+### Text output (interactive, TTY)
+
+When running interactively (with a TTY), findings are printed to stdout and the user is prompted:
+
+```text
+firefox: CLEAN
+
+aspell-en: ADVISORY
+  [HIGH] Source URL uses shortener; cannot verify upstream authenticity
+    ↳ PKGBUILD:8 (https://bit.ly/2kL9sP)
+
+Proceed with install? [y/N]
+```
+
+- **Clean** → no prompt, continue
+- **Advisory** → prompt y/N (allow → continue, deny → abort)
+- **Block** → no prompt, abort
+
+### Non-TTY / --json (CI, cron, scripted)
+
+When stdout is not a TTY or `--json` is used, no interactive prompt occurs:
+
+- **Clean** → exit 0
+- **Advisory** → exit 1 (caller must decide)
+- **Block** → exit 2 (caller must interpret as error)
+
+Useful for CI pipelines and automated scans:
+
+```bash
+aurscan check $PACKAGES --json > scan.json
+EXITCODE=$?
+if [ $EXITCODE -eq 2 ]; then
+  echo "Build blocked by security findings" >&2
+  exit 1
+fi
+```
+
+## Acknowledged findings
+
+Users can acknowledge specific findings to suppress re-alerts for the same content. Acknowledgements are stored in `~/.config/aurscan/acknowledged.toml` and keyed by `(package, detector_id, evidence_hash)`.
+
+Example:
+
+```toml
+# Acknowledged findings are suppressed from text output but still recorded in JSON
+
+[[acks]]
+package = "aspell-en"
+detector = "source_provenance"
+evidence_hash = "abc123..."  # SHA256(location + excerpt)
+reason = "Reviewed and acceptable"
+acknowledged_at = "2026-07-07T12:34:56Z"
+```
+
+To acknowledge a finding interactively:
+
+```bash
+aurscan check aspell-en
+# Output shows a finding...
+# Prompt: "Acknowledge this finding? [y/N]"
+# User answers "y" → finding is added to acknowledged.toml
+```
+
+To remove acknowledgements:
+
+```bash
+rm ~/.config/aurscan/acknowledged.toml  # Clear all
+# OR edit the file manually
+```
+
+Acknowledgements auto-expire when the evidence changes (e.g., a URL is fixed, a binary is rebuilt), so re-alerts trigger for the updated package.
+
+## Caveats & known limitations
+
+### TTY inheritance in hooks
+
+Both PreBuildCommand and the ALPM hook are run by paru and pacman in shell contexts. TTY inheritance is verified (interactive prompts work), but behavior may vary by shell, paru version, and pacman configuration. If prompts don't work, the hook defaults to blocking Advisory findings (conservative behavior).
+
+### VCS sources (-git packages)
+
+Packages with VCS sources (e.g., `pkgver()` functions that fetch from git) are staged as follows:
+
+- Stage 1: PKGBUILD is scanned (detects malicious `pkgver()` shell code)
+- Stage 2: `makepkg --verifysource` fetches HEAD into `$srcdir/` but does not execute the full build; sources are scanned
+
+This is safe and verified. However, if a VCS package's `pkgver()` function itself is the attack vector (e.g., it downloads an obfuscated binary and executes it), stage 1 heuristics (tree-sitter-bash AST, `elf_inspect` on binary artifacts) may not catch it. Stage 2 scans fetched artifacts; stage 3 scans the built binary. Combined, they reduce the window but do not eliminate it.
+
+### Recursive dependencies
+
+If package A depends on package B (both AUR), paru installs B first, then A. Each runs through PreBuildCommand + ALPM hook independently. There is no cross-package verdict (verdict is per-package), so you can allow A but block B.
+
+### Non-AUR packages
+
+The hook filters to foreign (AUR-installed) packages via the pacman database. Native repository packages (core, extra, community) are not scanned, as they are cryptographically signed by Arch maintainers.
+
+If you wish to audit non-AUR packages, use `aurscan audit` manually.
+
+## Troubleshooting
+
+### "PreBuildCommand not found" error
+
+Ensure paru v2.1.0 or later is installed. Check `paru --version` and `man paru.conf` for PreBuildCommand documentation.
+
+If upgrading paru, re-run `aurscan setup` to restore the configuration (paru may overwrite paru.conf during upgrade).
+
+### Hook not triggering on pacman -U
+
+Verify the hook file is installed:
+
+```bash
+ls -la /usr/share/libalpm/hooks/aurscan.hook
+```
+
+If missing, re-run `sudo aurscan setup` or reinstall the aurscan AUR package.
+
+### Interactive prompts not working in hook
+
+If prompts show up during PreBuildCommand but not in the ALPM hook, pacman's hook environment may not inherit TTY. This is expected; the hook defaults to blocking Advisory findings (conservative behavior).
+
+Workaround: use `aurscan install` wrapper (secondary UX) which runs in the foreground and supports interactive prompts.
+
+### Override a blocked package
+
+During interactive mode, use `--allow <package>`:
+
+```bash
+aurscan check $PACKAGES --allow aspell-en
+```
+
+This overrides Block verdicts for the specified package. Does not work in non-TTY/`--json` mode.
+
+## Security notes
+
+- The scanner itself is distributed via the AUR — verify the first install manually (inspect the PKGBUILD source).
+- The hook runs unprivileged for stages 1–3; system audit (stage 4) may require elevated privileges.
+- Cache hit/miss is deterministic (content-addressed); cache contents are not signed but are self-validating via Blake3 hashes.
+- Acknowledged findings are never silently dropped; they are logged and summarized in text output ("N findings acknowledged").
