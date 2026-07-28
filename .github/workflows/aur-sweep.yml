@@ -1,0 +1,90 @@
+# Discovery layer for detector false positives.
+#
+# The vendored snapshot in tests/fixtures/benign-snapshot/ prevents regressions
+# on known-good shapes. It cannot find shapes nobody has thought of yet: it is
+# frozen, and the AUR is not. This job scans the *live* top-N weekly and
+# reports any Block.
+#
+# It deliberately does NOT run on pull_request or push. AUR content changes
+# underneath us, so a live network dependency in the PR gate would be flaky and
+# would let a third party turn the build red. Scheduled-only means it can fail
+# loudly (red run, notification) without ever gating a change.
+#
+# When this fails: a popular AUR package is being Blocked. Treat it as a
+# detector false positive until proven otherwise, fix the detector, then run
+# `python3 scripts/refresh_benign_snapshot.py` to pull the new shape into the
+# committed snapshot so it stays fixed.
+name: AUR live sweep
+
+on:
+  schedule:
+    - cron: '17 6 * * 1' # Mondays 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      top:
+        description: How many popular package bases to sweep
+        default: '100'
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    name: false-positive sweep against the live AUR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build
+        run: cargo build --release --locked
+
+      # A wider net than the committed snapshot: this is the discovery layer,
+      # so it is worth paying for more packages here than in the frozen gate.
+      # TOP goes through env and is validated rather than being interpolated
+      # straight into the shell.
+      - name: Fetch live top-N PKGBUILDs
+        env:
+          TOP: ${{ inputs.top || '100' }}
+        run: |
+          case "$TOP" in
+            ''|*[!0-9]*) echo "::error::top must be a positive integer"; exit 1 ;;
+          esac
+          python3 scripts/refresh_benign_snapshot.py --top "$TOP" --out "$RUNNER_TEMP/live"
+
+      # Exit codes: 0 clean, 1 advisory, 2 block. Only 2 is a finding worth
+      # failing on -- real packages legitimately raise advisories.
+      - name: Scan
+        run: |
+          blocked=0
+          for dir in "$RUNNER_TEMP"/live/*/; do
+            name=$(basename "$dir")
+            log="$RUNNER_TEMP/$name.log"
+            ./target/release/aurscan --no-color check "$dir" > "$log" 2>&1 && status=0 || status=$?
+            if [ "$status" -eq 2 ]; then
+              blocked=$((blocked + 1))
+              {
+                echo "### :rotating_light: \`$name\` was BLOCKED"
+                echo '```'
+                cat "$log"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+            elif [ "$status" -gt 2 ]; then
+              echo "::warning::aurscan exited $status on $name (crash, not a verdict)"
+            fi
+          done
+          if [ "$blocked" -gt 0 ]; then
+            echo "::error::$blocked popular AUR package(s) Blocked — likely detector false positives"
+            exit 1
+          fi
+          echo ":white_check_mark: No Blocks across the live top-N." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scan logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sweep-logs
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: ignore

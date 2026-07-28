@@ -23,6 +23,7 @@ pub const BENIGN_FIXTURES: &[&str] = &[
     "libwidget",
     "miniplayer-theme",
     "fastcat-bin",
+    "worktrunk-bin",
 ];
 
 /// Severity mirror of `aurscan_core::Severity`, ordered for threshold checks.
@@ -89,8 +90,29 @@ pub struct ScanResult {
 
 /// Absolute path to the `tests/fixtures/` tree, located relative to this
 /// crate's manifest so it resolves no matter the working directory.
-fn fixtures_root() -> PathBuf {
+pub fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// The vendored real-AUR snapshot package names, read off disk and sorted.
+///
+/// Enumerated rather than hardcoded like `BENIGN_FIXTURES`: the set turns over
+/// whenever `scripts/refresh_benign_snapshot.py` reruns, and a stale constant
+/// would silently stop testing packages that are still on disk.
+pub fn snapshot_packages() -> Vec<String> {
+    let root = fixtures_root().join("benign-snapshot");
+    let mut names: Vec<String> = std::fs::read_dir(&root)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert!(
+        !names.is_empty(),
+        "benign snapshot is empty; run scripts/refresh_benign_snapshot.py"
+    );
+    names
 }
 
 /// Run the compiled binary over `fixtures/<rel>`, sharing `cache_home` as the

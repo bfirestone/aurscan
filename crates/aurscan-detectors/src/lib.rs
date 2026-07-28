@@ -10,7 +10,11 @@
 /// - 2: `pkgbuild_static` write-destination fix -- source operands are no
 ///   longer mistaken for write targets, clearing a false-positive Block on
 ///   packages using `install -Dm644 /dev/stdin "$pkgdir/..."`.
-pub const DETECTOR_EPOCH: u32 = 2;
+/// - 3: `pkgbuild_static` no longer treats discard/stream device nodes
+///   (`/dev/null`, `/dev/stderr`, ...) as system-path writes, clearing a
+///   false-positive Block on `paru`, `shelly-bin` and `xrizer`. Destructive
+///   nodes (`/dev/sda`, `/dev/mem`) still Block.
+pub const DETECTOR_EPOCH: u32 = 3;
 
 pub mod archive_layout;
 pub mod aur_metadata;

@@ -252,11 +252,29 @@ cargo build --release --locked --bin aurscan
 
 ### Tests
 
-The workspace includes 190 unit tests covering detectors, rules, verdict logic, and the scan engine.
+The workspace includes 159 tests covering detectors, rules, verdict logic, and the scan engine.
 
 ```bash
 cargo test --locked
 ```
+
+Four end-to-end corpora drive the compiled binary rather than calling internals:
+
+| Corpus | Asserts |
+|---|---|
+| `fixtures/incident/` | known-malicious packaging is caught |
+| `fixtures/novel/` | unseen attack *shapes* are caught without a signature |
+| `fixtures/benign/` | hand-written clean packages stay clean |
+| `fixtures/benign-snapshot/` | the real top-50 AUR packages, vendored — **zero Blocks** |
+
+The snapshot corpus is the false-positive floor. Hand-written fixtures only
+cover shapes someone thought to write down; blocking a package real users
+install is the worst failure mode for a tool wired into `paru`'s pre-build
+gate. Refresh it with `python3 scripts/refresh_benign_snapshot.py` and review
+the diff — see `crates/aurscan-cli/tests/fixtures/benign-snapshot/README.md`.
+
+A scheduled `AUR live sweep` workflow scans the current live top-N weekly to
+catch idioms the frozen snapshot cannot. It reports; it never gates PRs.
 
 ## Security considerations
 

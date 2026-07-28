@@ -1,0 +1,308 @@
+{
+  "_comment": "Vendored third-party AUR PKGBUILDs, ranked by popularity at fetch time. Regenerate with scripts/refresh_benign_snapshot.py and review the diff.",
+  "fetched": "2026-07-27",
+  "source": "https://aur.archlinux.org/packages-meta-v1.json.gz",
+  "count": 50,
+  "packages": [
+    {
+      "pkgbase": "accounts-qml-module",
+      "popularity": 12.091,
+      "num_votes": 26,
+      "sha256": "da562e2a5a6167172d02ed08f269680d5f42bf56a825da5515228590c305489a"
+    },
+    {
+      "pkgbase": "antigravity-cli",
+      "popularity": 9.3849,
+      "num_votes": 22,
+      "sha256": "f637d3f5704e708c669aa48b1326adc4c1c604f6490bc20471d2ff22ec03f82e"
+    },
+    {
+      "pkgbase": "antigravity-ide",
+      "popularity": 6.7831,
+      "num_votes": 80,
+      "sha256": "82a0b1f580bbaaa56047b7b0655ee291448f24624a70266bfb422182248f5478"
+    },
+    {
+      "pkgbase": "aur-sync-vote",
+      "popularity": 61.7701,
+      "num_votes": 212,
+      "sha256": "ca895a0b4affb4b66f6da817d383c874d30477cc9602426aa6f8afad78780ffc"
+    },
+    {
+      "pkgbase": "betterbird-bin",
+      "popularity": 11.0866,
+      "num_votes": 301,
+      "sha256": "d92830670f152e2da03c98050b03fc26a1652e6a8a84a292c9216998b075829e"
+    },
+    {
+      "pkgbase": "brave-bin",
+      "popularity": 23.5017,
+      "num_votes": 1023,
+      "sha256": "2a3ab2bf0ddadf40ebe8bdfd933e93e9f5c4fff37d195ba1e5d0b3bf0a905fdb"
+    },
+    {
+      "pkgbase": "brave-origin-bin",
+      "popularity": 23.0279,
+      "num_votes": 43,
+      "sha256": "6406b992d39fae44d2ba37113e0424998e1850ea92f09bfd931e5702988e516a"
+    },
+    {
+      "pkgbase": "brave-origin-nightly-bin",
+      "popularity": 7.0633,
+      "num_votes": 23,
+      "sha256": "3664463af2627f5b05519e96e4bd7752614bde898c3a007a25dc3a041bc0c100"
+    },
+    {
+      "pkgbase": "byobu",
+      "popularity": 7.3596,
+      "num_votes": 15,
+      "sha256": "0b7517c2c881003f6e16fd8faec1843b684287ec3f8db1ce6ba7f6d065d37cbc"
+    },
+    {
+      "pkgbase": "claude-code",
+      "popularity": 15.3918,
+      "num_votes": 86,
+      "sha256": "df40162ca40011bd816627d97758c8b92a98771473c4c764ebdcf3db2616931f"
+    },
+    {
+      "pkgbase": "claude-desktop",
+      "popularity": 8.55,
+      "num_votes": 11,
+      "sha256": "409a25e1362eae1d338d158848f26aba0718c1a8eda33f9f874c6be2cac2bf98"
+    },
+    {
+      "pkgbase": "downgrade",
+      "popularity": 14.7462,
+      "num_votes": 906,
+      "sha256": "cb5e3297a5553e7862f6c415d58f3357d8604076602ba2e31cdb2f174a069f84"
+    },
+    {
+      "pkgbase": "electron37",
+      "popularity": 7.5596,
+      "num_votes": 9,
+      "sha256": "965104d52ca7da94a33b7e0e89b8f207de4f70bf2fcf49c1dab6f9198893e028"
+    },
+    {
+      "pkgbase": "electron40-bin",
+      "popularity": 7.6691,
+      "num_votes": 28,
+      "sha256": "60738f4e51c8e406b57f1bbf3f882fe3c269e7fb9ebee821d089774e00fafb42"
+    },
+    {
+      "pkgbase": "exodus-bin",
+      "popularity": 10.7701,
+      "num_votes": 36,
+      "sha256": "63efdb3aad2446abd93f9db1f40f9d877da4dac4dae0c730a2b68c3449841907"
+    },
+    {
+      "pkgbase": "faugus-launcher",
+      "popularity": 32.7181,
+      "num_votes": 75,
+      "sha256": "dcfb91f69fecded00c2a4112e1b50d74ea717499b81f53c0ed8bc758377c64f4"
+    },
+    {
+      "pkgbase": "google-chrome",
+      "popularity": 13.9294,
+      "num_votes": 2362,
+      "sha256": "8e52d397bfa912304ea409a5bed8c42eb0cfb23d23d26daf9dbba6f37ea83479"
+    },
+    {
+      "pkgbase": "gtk2",
+      "popularity": 16.1877,
+      "num_votes": 92,
+      "sha256": "03577a5574809310ecfdc01562c4a36586da7391745e68d7e4b53555745aee93"
+    },
+    {
+      "pkgbase": "helium-browser-bin",
+      "popularity": 10.5525,
+      "num_votes": 85,
+      "sha256": "9a17113eeac459fcb6d3d1b5f3377773f366b640293192e7faeecb977a2f6259"
+    },
+    {
+      "pkgbase": "heroic-games-launcher-bin",
+      "popularity": 12.8785,
+      "num_votes": 287,
+      "sha256": "facd1d72f5d2b966c3a263ff9482dce2b591133cdac5c19346236c66387cb033"
+    },
+    {
+      "pkgbase": "jellium-desktop-git",
+      "popularity": 7.9345,
+      "num_votes": 22,
+      "sha256": "c569f2a24444e72114cbfeafe8860dc22c42d4feb012096d27afe3de9ca034b8"
+    },
+    {
+      "pkgbase": "jetbrains-toolbox",
+      "popularity": 7.827,
+      "num_votes": 218,
+      "sha256": "5ab2e178e3fa43541475a66b6fc67b0b57f7d666617e765edda61531a38e44df"
+    },
+    {
+      "pkgbase": "lib32-gstreamer",
+      "popularity": 13.3493,
+      "num_votes": 41,
+      "sha256": "298374daa27e0598305969dc1cf4c13e82da77e9709fba8432a4f0c4cf140df3"
+    },
+    {
+      "pkgbase": "librewolf",
+      "popularity": 7.5996,
+      "num_votes": 226,
+      "sha256": "2a09e6c5d31b6f3940d54b87753243d74a12196623a4609bac0f19cf534b68a5"
+    },
+    {
+      "pkgbase": "librewolf-bin",
+      "popularity": 19.7085,
+      "num_votes": 647,
+      "sha256": "cdb63e42b3414a2fb1703f08b645d59ea711d948b8fe96e78d6d5c7ddc36b93c"
+    },
+    {
+      "pkgbase": "libsoup",
+      "popularity": 16.9568,
+      "num_votes": 29,
+      "sha256": "d0f6049fbf70dde87706e453d52db503cf449357666c96e0dd03b6dac0b18f46"
+    },
+    {
+      "pkgbase": "lmstudio-bin",
+      "popularity": 7.1083,
+      "num_votes": 65,
+      "sha256": "fc707989f71a64deeef47e175766e8115a38b3427672176584d56968c23c7c00"
+    },
+    {
+      "pkgbase": "localsend-bin",
+      "popularity": 8.1153,
+      "num_votes": 139,
+      "sha256": "69298ad5d097650b22f398809e8f6d1d104342b9f0d9c6c9d186c7590eb2d849"
+    },
+    {
+      "pkgbase": "mbedtls2",
+      "popularity": 7.4722,
+      "num_votes": 10,
+      "sha256": "2696a7b8abf5719c215032b35e2d35c60fcbcc4cbd5dc9dd7c067b6fa76465d6"
+    },
+    {
+      "pkgbase": "monado",
+      "popularity": 7.9377,
+      "num_votes": 51,
+      "sha256": "1cb9350b9159bd22fcf30cf9d8dc310dadfd2251bd9bdfd21fe0633279b1579a"
+    },
+    {
+      "pkgbase": "noctalia",
+      "popularity": 12.0278,
+      "num_votes": 16,
+      "sha256": "37692c5bcf78d4d24ca6d38a36d535d6c7946f4b503d2c9d8f10a0b52db8ed73"
+    },
+    {
+      "pkgbase": "nvidia-580xx-utils",
+      "popularity": 7.954,
+      "num_votes": 83,
+      "sha256": "54f00a591b74eea5446c8d77ec4b990543de3019a38b6d191ec09f3ff58ef69b"
+    },
+    {
+      "pkgbase": "openssl-1.1",
+      "popularity": 6.796,
+      "num_votes": 34,
+      "sha256": "4bc22428a626997984b358bd90c69166abcd243f9684a063d0a364e04bf37495"
+    },
+    {
+      "pkgbase": "paru",
+      "popularity": 32.4573,
+      "num_votes": 1241,
+      "sha256": "eef27a597fef8a6c1f4f6fedc8844f592007d1ac93b7194940394937b6dd4f8b"
+    },
+    {
+      "pkgbase": "plasma6-applets-panel-colorizer",
+      "popularity": 6.9458,
+      "num_votes": 23,
+      "sha256": "a9246817d0ede835d141ae31ae195ee6985f8dc74d406fb1cc863f7df5debe0c"
+    },
+    {
+      "pkgbase": "proton-ge-custom-bin",
+      "popularity": 16.5745,
+      "num_votes": 293,
+      "sha256": "3a93e5a410ad792b6cfe2323670f068807e36c376248953f4271ba855b717809"
+    },
+    {
+      "pkgbase": "rustdesk-bin",
+      "popularity": 10.3709,
+      "num_votes": 166,
+      "sha256": "ba8c33c7c8e9119b978d1f5212f2fa4f86781e01f82c889e0b20dda19f8de1ce"
+    },
+    {
+      "pkgbase": "shelly-bin",
+      "popularity": 8.571,
+      "num_votes": 20,
+      "sha256": "c45a2ef398e92ea1f893135ab8c8caab738e68b19d6e08394c08e9e33686b440"
+    },
+    {
+      "pkgbase": "spotify",
+      "popularity": 7.9472,
+      "num_votes": 271,
+      "sha256": "6507db69a134955f154429a9ca9b99090a075226d0cb170d5779f35c00cef61a"
+    },
+    {
+      "pkgbase": "traur-bin",
+      "popularity": 7.0603,
+      "num_votes": 23,
+      "sha256": "4ea94970a01e318b13f70b55df2108792eec0d78cd69c8437e2955c458d79dd2"
+    },
+    {
+      "pkgbase": "ttf-ms-fonts",
+      "popularity": 10.0978,
+      "num_votes": 2189,
+      "sha256": "ba7fc69ee35514e5179f21baa4e472218ec0d2e65e87102cd74639c74a2f7e86"
+    },
+    {
+      "pkgbase": "ventoy-bin",
+      "popularity": 9.6347,
+      "num_votes": 457,
+      "sha256": "a1fb14d342d80a969c4a81949fcd99be37a7605bd2408e6bd982a683c1a66ff8"
+    },
+    {
+      "pkgbase": "vesktop-bin",
+      "popularity": 10.9405,
+      "num_votes": 159,
+      "sha256": "6c5c2617f7edf47f8fdcee3576046660dcd4ae1af22f404fdc0145dba1017254"
+    },
+    {
+      "pkgbase": "visual-studio-code-bin",
+      "popularity": 28.8453,
+      "num_votes": 1699,
+      "sha256": "92ad66c03801cc337214aa04d28aa64730065161a57635c772a409bb3b5c4074"
+    },
+    {
+      "pkgbase": "vscodium-bin",
+      "popularity": 11.4681,
+      "num_votes": 390,
+      "sha256": "0946e74b33e4bc7312dcd6b9fceb3c611d60c8874d792ab69a65cf32c31d6704"
+    },
+    {
+      "pkgbase": "wivrn-server",
+      "popularity": 9.3828,
+      "num_votes": 97,
+      "sha256": "3b9445e5806800e1328cd03a82da918cc81c5202d9b961cbea8eb81593dd6239"
+    },
+    {
+      "pkgbase": "xrizer",
+      "popularity": 8.2236,
+      "num_votes": 56,
+      "sha256": "07949e0becaf9a1f7ae8039f9e7183c2e6af86788d1e87421edd405fdb114ac1"
+    },
+    {
+      "pkgbase": "yay",
+      "popularity": 47.1603,
+      "num_votes": 2632,
+      "sha256": "5c1cb01eca47edb4e4665d8734a23bd71d33ba240093ff5a125e0bb2daa8e473"
+    },
+    {
+      "pkgbase": "zen-browser-bin",
+      "popularity": 18.618,
+      "num_votes": 325,
+      "sha256": "78d6ca0ea47e833e7c8b77530adfbb78b2a6e320772b6d140665557dfa07faa0"
+    },
+    {
+      "pkgbase": "zoom",
+      "popularity": 6.8861,
+      "num_votes": 734,
+      "sha256": "1f4a34d1cedb79091ac010a01260110bdf2487b4a2040437d71088c28f8f5f95"
+    }
+  ]
+}

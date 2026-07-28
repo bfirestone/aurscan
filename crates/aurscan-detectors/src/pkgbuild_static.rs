@@ -18,6 +18,42 @@ const SHELL_NAMES: &[&str] = &["sh", "bash", "zsh", "dash", "ash"];
 const PIPE_SOURCE_NAMES: &[&str] = &["curl", "wget", "fetch", "python", "python3", "perl"];
 /// Network-capable commands that do not belong in build phases.
 const NETWORK_NAMES: &[&str] = &["curl", "wget", "fetch", "git", "rsync", "scp", "nc", "ncat"];
+/// `git` subcommands that operate purely on local state. Deliberately excludes
+/// `clone`/`fetch`/`pull`/`push`/`remote`/`ls-remote`/`submodule`/`archive`.
+const LOCAL_GIT_SUBCOMMANDS: &[&str] = &[
+    "add",
+    "am",
+    "apply",
+    "bisect",
+    "blame",
+    "branch",
+    "cat-file",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "commit",
+    "config",
+    "describe",
+    "diff",
+    "format-patch",
+    "init",
+    "log",
+    "merge",
+    "mv",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "rev-parse",
+    "rm",
+    "show",
+    "sparse-checkout",
+    "stash",
+    "status",
+    "switch",
+    "tag",
+    "worktree",
+];
 /// Commands that write files to a destination path.
 const WRITE_NAMES: &[&str] = &["cp", "mv", "install", "tee", "dd", "ln"];
 /// PKGBUILD / install phases where a bare network fetch is out-of-band.
@@ -42,6 +78,19 @@ const INSTALL_HOOK_FNS: &[&str] = &[
 const DAEMON_PHASES: &[&str] = &["post_install", "post_upgrade"];
 /// Substrings that mark a destination path as a legitimate build target.
 const SAFE_DEST_MARKERS: &[&str] = &["$pkgdir", "${pkgdir}", "$srcdir", "${srcdir}", "/tmp"];
+/// Device nodes that are harmless to *write to*: the write either discards the
+/// data or sends it to an already-inherited stream, so nothing on the system
+/// is modified. Kept deliberately narrow — most of `/dev` is not safe: writes
+/// to block devices (`/dev/sda`, `/dev/nvme0n1`) or kernel memory (`/dev/mem`,
+/// `/dev/port`) are wipers, and must keep Blocking.
+const SAFE_WRITE_DEVICES: &[&str] = &[
+    "/dev/null",
+    "/dev/zero",
+    "/dev/full",
+    "/dev/stdout",
+    "/dev/stderr",
+    "/dev/tty",
+];
 
 pub struct PkgbuildStaticDetector {
     lang: tree_sitter::Language,
@@ -389,7 +438,7 @@ impl<'a> Walker<'a> {
             self.feat.count_chmod_exec += 1;
         }
 
-        if NETWORK_NAMES.contains(&name) {
+        if NETWORK_NAMES.contains(&name) && !is_local_only_git(name, &args) {
             self.feat.count_network += 1;
             let in_phase = cur_fn.map(|f| NETWORK_PHASES.contains(&f)).unwrap_or(false);
             if in_phase {
@@ -483,8 +532,54 @@ impl<'a> Walker<'a> {
     /// True when a destination path is an absolute system path that is not a
     /// sanctioned build directory.
     fn is_system_path(&self, dest: &str) -> bool {
-        dest.starts_with('/') && !SAFE_DEST_MARKERS.iter().any(|m| dest.contains(m))
+        dest.starts_with('/')
+            && !SAFE_DEST_MARKERS.iter().any(|m| dest.contains(m))
+            && !is_safe_write_device(dest)
     }
+}
+
+/// True when a `git` invocation uses a subcommand that cannot reach the
+/// network, so it is not an out-of-band fetch.
+///
+/// `git` earns its place in `NETWORK_NAMES` via `clone`/`fetch`/`pull`, but
+/// distro packaging leans on the *local* subcommands constantly: `git apply`
+/// and `git cherry-pick` in `prepare()` patch content that `source=()` already
+/// fetched. Flagging those blocked nothing but produced Medium noise on
+/// `gtk2`, `libsoup` and `lib32-gstreamer`.
+///
+/// Deny-by-default, matching `is_system_path`: only a *recognized* local
+/// subcommand is exempt. An unknown one (or a bare `git`) still counts, so
+/// `submodule`, `ls-remote` and anything newly added stay flagged.
+fn is_local_only_git(name: &str, args: &[&str]) -> bool {
+    if name != "git" {
+        return false;
+    }
+    // Skip leading global flags (`git -C dir apply ...`) to find the verb.
+    // `-C`/`-c` take a value, so skip that too.
+    let mut it = args.iter().copied();
+    let subcommand = loop {
+        match it.next() {
+            None => return false,
+            Some(a) if a == "-C" || a == "-c" => {
+                it.next();
+            }
+            Some(a) if a.starts_with('-') => continue,
+            Some(a) => break a,
+        }
+    };
+    LOCAL_GIT_SUBCOMMANDS.contains(&subcommand)
+}
+
+/// True when `dest` names a device node that is harmless to write to.
+///
+/// Note on matching: `SAFE_DEST_MARKERS` uses substring `contains` because
+/// `$pkgdir` legitimately appears mid-path. That is the wrong rule here — a
+/// substring match would exempt anything merely *containing* a safe node's
+/// name (`/dev/null.bak`, or a crafted `/dev/sda` sibling). Device paths are
+/// exact, so match them exactly. `/dev/fd/` is the one prefix case: the
+/// numbered entries are all inherited descriptors.
+fn is_safe_write_device(dest: &str) -> bool {
+    SAFE_WRITE_DEVICES.contains(&dest) || dest.starts_with("/dev/fd/")
 }
 
 /// True for a short-flag bundle (`-Dm644`) containing `ch`. Case-sensitive:
@@ -587,6 +682,45 @@ mod tests {
             "package() {\n  install -Dm644 /dev/stdin \"$pkgdir/usr/share/fish/vendor_completions.d/wt.fish\" <<'EOF'\ncompletions\nEOF\n}\n",
         );
         assert!(got.is_empty(), "expected no write finding, got {got:?}");
+    }
+
+    #[test]
+    fn redirect_to_discard_and_stream_devices_is_not_a_system_write() {
+        // Regression: paru, shelly-bin and xrizer -- all top-50 AUR packages --
+        // were BLOCKED for `> /dev/null`. Writing to a discard node or an
+        // already-inherited stream modifies nothing on the system.
+        for script in [
+            "build() {\n  make 2>&1 > /dev/null\n}\n",
+            "package() {\n  rm -f stale 2>/dev/null\n}\n",
+            "prepare() {\n  patch -p1 >/dev/null\n}\n",
+            "build() {\n  echo progress > /dev/stderr\n}\n",
+            "build() {\n  echo x > /dev/fd/3\n}\n",
+        ] {
+            let got = write_findings(script);
+            assert!(
+                got.is_empty(),
+                "expected no finding for {script:?}, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_to_destructive_devices_is_still_flagged() {
+        // The exemption must stay narrow: block devices and kernel memory are
+        // the wiper targets a scanner exists to catch.
+        for dest in ["/dev/sda", "/dev/nvme0n1", "/dev/mem", "/dev/port"] {
+            let got = write_findings(&format!("package() {{\n  echo x > {dest}\n}}\n"));
+            assert_eq!(got.len(), 1, "expected a finding for {dest}, got {got:?}");
+            assert!(got[0].contains(dest), "got {got:?}");
+        }
+    }
+
+    #[test]
+    fn safe_device_match_is_exact_not_substring() {
+        // A substring rule would exempt any path merely *containing* a safe
+        // node's name, which is a trivial bypass.
+        let got = write_findings("package() {\n  echo x > /dev/null.bak\n}\n");
+        assert_eq!(got.len(), 1, "got {got:?}");
     }
 
     #[test]
@@ -712,6 +846,63 @@ mod tests {
             ScriptKind::Pkgbuild,
         );
         assert!(r.findings.iter().any(|f| f.severity >= Severity::Medium));
+    }
+
+    /// Findings about out-of-band network calls, by message.
+    fn network_findings(content: &str) -> Vec<String> {
+        scan_str(content, ScriptKind::Pkgbuild)
+            .findings
+            .into_iter()
+            .filter(|f| f.reason.contains("out-of-band network call"))
+            .map(|f| f.reason)
+            .collect()
+    }
+
+    #[test]
+    fn local_git_subcommands_in_prepare_are_not_network_calls() {
+        // Regression: gtk2, libsoup and lib32-gstreamer -- all top-50 AUR
+        // packages -- raised Medium findings for patching content that
+        // source=() had already fetched.
+        for script in [
+            "prepare() {\n  git apply -3 ../0001-fix.patch\n}\n",
+            "prepare() {\n  git cherry-pick -n 2.74.3..5739a09\n}\n",
+            "prepare() {\n  git -C \"$srcdir/gtk\" apply ../0002-fix.patch\n}\n",
+            "prepare() {\n  git am ../patches/0001.patch\n}\n",
+        ] {
+            let got = network_findings(script);
+            assert!(
+                got.is_empty(),
+                "expected no finding for {script:?}, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn network_git_subcommands_are_still_flagged() {
+        // The exemption is deny-by-default: fetching subcommands, and any
+        // subcommand not recognized as local, still count.
+        for script in [
+            "prepare() {\n  git clone https://example.com/extra.git\n}\n",
+            "prepare() {\n  git fetch origin\n}\n",
+            "prepare() {\n  git submodule update --init\n}\n",
+            "prepare() {\n  git ls-remote https://example.com/x.git\n}\n",
+            "prepare() {\n  git some-future-subcommand\n}\n",
+            "prepare() {\n  git\n}\n",
+        ] {
+            let got = network_findings(script);
+            assert_eq!(
+                got.len(),
+                1,
+                "expected a finding for {script:?}, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_git_exemption_does_not_leak_to_other_network_commands() {
+        // `apply` is a local *git* verb, not a blanket allowlist token.
+        let got = network_findings("prepare() {\n  curl apply\n}\n");
+        assert_eq!(got.len(), 1, "got {got:?}");
     }
 
     #[test]

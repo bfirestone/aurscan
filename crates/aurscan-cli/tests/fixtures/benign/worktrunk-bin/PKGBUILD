@@ -1,0 +1,45 @@
+# Benign fixture: the false-positive shapes that real AUR packages taught us,
+# gathered into one recipe. Each was a Block against a package real users
+# install, and each is exercised here through the full engine + verdict path --
+# the detector unit tests pin the parse, this pins the outcome.
+#
+#   install -Dm644 /dev/stdin "$pkgdir/..."  heredoc-to-file (worktrunk-bin)
+#   ... > /dev/null                          discard redirect (paru, xrizer)
+#   git apply in prepare()                   local patching (gtk2, libsoup)
+pkgname=worktrunk-bin
+pkgver=0.9.2
+pkgrel=1
+pkgdesc="Git worktree manager (precompiled)"
+arch=('x86_64')
+url="https://github.com/example/worktrunk"
+license=('MIT')
+makedepends=('git')
+provides=('worktrunk')
+conflicts=('worktrunk')
+source=("https://github.com/example/worktrunk/releases/download/v0.9.2/worktrunk-0.9.2-x86_64.tar.gz"
+        "0001-fix-completion-path.patch")
+sha256sums=('9f2c1d4b8e7a3056c1f9d2b4a8e7c3f501d9b2a4c8e7f30516d9b2a4c8e7f3051'
+            'b4a8e7c3f501d9b2a4c8e7f30516d9b2a4c8e7f30516d9b2a4c8e7f30516d9b2')
+
+prepare() {
+  cd "$srcdir/worktrunk-0.9.2"
+  # Patching content that source=() already fetched -- no network involved.
+  git apply -3 ../0001-fix-completion-path.patch
+}
+
+build() {
+  cd "$srcdir/worktrunk-0.9.2"
+  # Silencing a chatty helper is not a write to a system path.
+  ./configure --prefix=/usr > /dev/null 2>&1
+}
+
+package() {
+  cd "$srcdir/worktrunk-0.9.2"
+  install -Dm755 wt "$pkgdir/usr/bin/wt"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  # Heredoc as the *source* operand; the destination is inside $pkgdir.
+  install -Dm644 /dev/stdin "$pkgdir/usr/share/fish/vendor_completions.d/wt.fish" <<'EOF'
+complete -c wt -n __fish_use_subcommand -a switch -d 'Switch worktree'
+EOF
+}
