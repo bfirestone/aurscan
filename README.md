@@ -17,7 +17,11 @@ Unlike the legacy incident-specific Python tool (`legacy/aurscan.py`, retained f
 
 ## Install
 
-### From AUR (recommended)
+### From AUR
+
+> **Not yet published.** `paru -S aurscan` does not work yet — the AUR submission is pending. Use one of the methods below until then.
+
+Once published:
 
 ```bash
 paru -S aurscan
@@ -26,10 +30,21 @@ aurscan setup  # Enable paru PreBuildCommand integration and pacman hook
 
 If paru updates its paru.conf and overwrites the custom `PreBuildCommand`, run `aurscan setup` again to restore it.
 
+### From the PKGBUILD (recommended today)
+
+Builds the released tarball with checksum verification, and installs the pacman hook and license the same way the AUR package will:
+
+```bash
+git clone https://github.com/bfirestone/aurscan
+cd aurscan
+makepkg -si
+aurscan setup
+```
+
 ### From source (cargo install)
 
 ```bash
-git clone https://github.com/<owner>/aurscan
+git clone https://github.com/bfirestone/aurscan
 cd aurscan
 cargo install --path crates/aurscan-cli
 aurscan setup  # Install the paru.conf snippet and pacman hook
