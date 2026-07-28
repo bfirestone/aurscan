@@ -39,8 +39,9 @@ package() {
 	# Install documentation
 	install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
 
-	# Install license (if LICENSE file exists; otherwise skip)
-	if [ -f "LICENSE" ]; then
-		install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
-	fi
+	# Install license. MIT is a custom license under Arch packaging guidelines,
+	# so a copy is required in /usr/share/licenses/$pkgname/. Unconditional on
+	# purpose: a missing LICENSE must fail the build, not ship a package that
+	# silently violates the guidelines.
+	install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
