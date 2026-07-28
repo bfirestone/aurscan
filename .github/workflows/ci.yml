@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Rust gate. Runs on ubuntu because the test suite is hermetic — every test
+  # drives fixtures under crates/aurscan-cli/tests/, and the one test that
+  # touches a real pacman database (audit::tests) asserts the *missing* case.
+  # Nothing here needs Arch.
+  rust:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # --locked so a drifting Cargo.lock fails here rather than inside
+      # makepkg, where build() also passes --locked.
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # Packaging gate. .SRCINFO is generated metadata that the AUR reads *instead
+  # of* parsing the PKGBUILD, so the two silently diverging is the classic AUR
+  # maintenance bug: users resolve stale deps/sources while the repo looks
+  # correct. This regenerates it and fails on any diff.
+  packaging:
+    name: PKGBUILD / .SRCINFO consistency
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install packaging tools
+        run: pacman -Syu --noconfirm --needed pacman-contrib namcap
+
+      # makepkg refuses to run as root.
+      - name: Create build user
+        run: |
+          useradd -m builder
+          chown -R builder:builder .
+
+      - name: Check .SRCINFO is in sync with PKGBUILD
+        run: |
+          su builder -c 'makepkg --printsrcinfo' > .SRCINFO.generated
+          if ! diff -u .SRCINFO .SRCINFO.generated; then
+            echo "::error::.SRCINFO is stale. Regenerate with: makepkg --printsrcinfo > .SRCINFO"
+            exit 1
+          fi
+
+      - name: Lint PKGBUILD
+        run: namcap PKGBUILD
