@@ -150,9 +150,10 @@ impl RedbCache {
     }
 
     fn key_bytes(key: &CacheKey) -> Vec<u8> {
-        let mut v = Vec::with_capacity(32 + 4 + key.detector.0.len());
+        let mut v = Vec::with_capacity(32 + 8 + key.detector.0.len());
         v.extend_from_slice(&key.content_hash);
         v.extend_from_slice(&key.ruleset_version.to_le_bytes());
+        v.extend_from_slice(&key.detector_epoch.to_le_bytes());
         v.extend_from_slice(key.detector.0.as_bytes());
         v
     }
@@ -200,6 +201,7 @@ mod tests {
             content_hash: [7u8; 32],
             detector: DetectorId("ioc_tokens"),
             ruleset_version: 1,
+            detector_epoch: 1,
         };
         let res = DetectorResult {
             findings: vec![Finding {
@@ -230,12 +232,40 @@ mod tests {
             content_hash: [1u8; 32],
             detector: DetectorId("d"),
             ruleset_version: 1,
+            detector_epoch: 1,
         };
         let k2 = CacheKey {
             ruleset_version: 2,
+            detector_epoch: 1,
             ..k1.clone()
         };
         cache.put(&k1, &DetectorResult::default());
         assert!(cache.get(&k2).is_none());
+    }
+
+    #[test]
+    fn detector_epoch_bump_misses() {
+        // A detector logic change must not serve verdicts computed by the
+        // previous logic. Without this, fixing a false positive leaves every
+        // already-scanned package still blocked, and a newly added detection
+        // never re-examines anything.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = super::RedbCache::open(&dir.path().join("t.redb")).unwrap();
+        let k1 = CacheKey {
+            content_hash: [7u8; 32],
+            detector: DetectorId("pkgbuild_static"),
+            ruleset_version: 3,
+            detector_epoch: 1,
+        };
+        let k2 = CacheKey {
+            detector_epoch: 2,
+            ..k1.clone()
+        };
+        cache.put(&k1, &DetectorResult::default());
+        assert!(
+            cache.get(&k1).is_some(),
+            "same epoch must still hit, or caching is pointless"
+        );
+        assert!(cache.get(&k2).is_none(), "epoch bump must invalidate");
     }
 }

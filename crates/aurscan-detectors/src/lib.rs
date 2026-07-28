@@ -1,3 +1,17 @@
+/// Version of the detectors' *logic*, independent of the ruleset data.
+///
+/// **Bump this whenever a detector change can alter a verdict for content
+/// that has not changed.** It is part of the scan cache key: without a bump,
+/// already-scanned packages keep their old verdicts forever, so a new
+/// detection never reaches them and a fixed false positive keeps blocking.
+///
+/// History:
+/// - 1: initial release (v0.1.0)
+/// - 2: `pkgbuild_static` write-destination fix -- source operands are no
+///   longer mistaken for write targets, clearing a false-positive Block on
+///   packages using `install -Dm644 /dev/stdin "$pkgdir/..."`.
+pub const DETECTOR_EPOCH: u32 = 2;
+
 pub mod archive_layout;
 pub mod aur_metadata;
 pub mod elf_inspect;

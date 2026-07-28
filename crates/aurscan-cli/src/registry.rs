@@ -47,6 +47,7 @@ pub fn build_engine(cfg: &Config) -> anyhow::Result<Engine> {
         cache,
         policy: cfg.policy(),
         ruleset_version,
+        detector_epoch: aurscan_detectors::DETECTOR_EPOCH,
     })
 }
 

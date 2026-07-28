@@ -409,13 +409,13 @@ impl<'a> Walker<'a> {
         }
 
         if WRITE_NAMES.contains(&name) {
-            for arg in &args {
-                if self.is_system_path(arg) {
+            for dest in write_destinations(name, &args) {
+                if self.is_system_path(dest) {
                     let scope = cur_fn.unwrap_or("script");
                     self.push(
                         Severity::High,
                         format!(
-                            "`{name}` writes to system path {arg} outside build dirs in {scope}()"
+                            "`{name}` writes to system path {dest} outside build dirs in {scope}()"
                         ),
                         node,
                     );
@@ -487,6 +487,76 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// True for a short-flag bundle (`-Dm644`) containing `ch`. Case-sensitive:
+/// `install -d` creates directories, `-D` creates the destination's parents.
+fn short_flag_has(arg: &str, ch: char) -> bool {
+    arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains(ch)
+}
+
+/// The operands a write-family command actually writes *to*.
+///
+/// Checking every argument is wrong: for `install`/`cp`/`mv`/`ln` the leading
+/// operands are *sources*, and reading from a system path is ordinary. That
+/// mistake blocked real packages -- `install -Dm644 /dev/stdin "$pkgdir/..."`
+/// writes inside `$pkgdir` and only *reads* `/dev/stdin` (a heredoc), yet was
+/// reported as writing to `/dev/stdin`.
+///
+/// Destination rules are per-command; there is no single "last argument" rule
+/// that holds for all of them.
+fn write_destinations<'b>(name: &str, args: &[&'b str]) -> Vec<&'b str> {
+    // `dd` names its destination explicitly; every other operand is input.
+    if name == "dd" {
+        return args.iter().filter_map(|a| a.strip_prefix("of=")).collect();
+    }
+
+    let mut operands: Vec<&'b str> = Vec::new();
+    let mut explicit_target: Option<&'b str> = None;
+    let mut end_of_flags = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if !end_of_flags {
+            if *arg == "--" {
+                end_of_flags = true;
+                continue;
+            }
+            if let Some(dir) = arg.strip_prefix("--target-directory=") {
+                explicit_target = Some(dir);
+                continue;
+            }
+            if *arg == "-t" || *arg == "--target-directory" {
+                explicit_target = iter.next().copied();
+                continue;
+            }
+            if arg.starts_with('-') && arg.len() > 1 {
+                continue;
+            }
+        }
+        operands.push(arg);
+    }
+
+    // `-t DIR` names the destination regardless of operand order.
+    if let Some(t) = explicit_target {
+        return vec![t];
+    }
+
+    match name {
+        // Every operand is written to.
+        "tee" => operands,
+        // `install -d a b c` creates each operand as a directory.
+        "install" if args.iter().any(|a| short_flag_has(a, 'd')) => operands,
+        // Otherwise the destination is the final operand -- but only when a
+        // source is also present. `ln -s /etc/foo` (one operand) links into
+        // the current directory; /etc/foo is the target being read.
+        _ => {
+            if operands.len() >= 2 {
+                operands.last().copied().into_iter().collect()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
 // --- Contract assertions ---
 const _: fn() = || {
     fn is_detector<T: aurscan_core::Detector>() {}
@@ -497,6 +567,103 @@ const _: fn() = || {
 mod tests {
     use super::*;
     use aurscan_core::ScanContext;
+
+    /// Findings mentioning a write to a system path, by message.
+    fn write_findings(content: &str) -> Vec<String> {
+        scan_str(content, ScriptKind::Pkgbuild)
+            .findings
+            .into_iter()
+            .filter(|f| f.reason.contains("writes to system path"))
+            .map(|f| f.reason)
+            .collect()
+    }
+
+    #[test]
+    fn install_from_dev_stdin_into_pkgdir_is_not_a_write_to_dev_stdin() {
+        // Regression: worktrunk-bin, a legitimate AUR package, was BLOCKED.
+        // /dev/stdin is the heredoc *source*; the destination is inside
+        // $pkgdir. Every argument was being checked as if it were a target.
+        let got = write_findings(
+            "package() {\n  install -Dm644 /dev/stdin \"$pkgdir/usr/share/fish/vendor_completions.d/wt.fish\" <<'EOF'\ncompletions\nEOF\n}\n",
+        );
+        assert!(got.is_empty(), "expected no write finding, got {got:?}");
+    }
+
+    #[test]
+    fn install_writing_outside_pkgdir_is_still_flagged() {
+        let got = write_findings("package() {\n  install -Dm755 helper /usr/bin/helper\n}\n");
+        assert_eq!(got.len(), 1, "got {got:?}");
+        assert!(got[0].contains("/usr/bin/helper"), "got {got:?}");
+    }
+
+    #[test]
+    fn target_directory_flag_names_the_destination() {
+        // `-t DIR src...` inverts the usual operand order.
+        let got = write_findings("package() {\n  install -m644 -t /etc/cron.d payload\n}\n");
+        assert_eq!(got.len(), 1, "got {got:?}");
+        assert!(got[0].contains("/etc/cron.d"), "got {got:?}");
+
+        // ...and the sources must not be mistaken for targets.
+        let safe = write_findings("package() {\n  install -t \"$pkgdir/usr/bin\" /dev/stdin\n}\n");
+        assert!(safe.is_empty(), "got {safe:?}");
+    }
+
+    #[test]
+    fn tee_writes_to_every_operand() {
+        let got = write_findings("package() {\n  echo x | tee /etc/profile.d/evil.sh\n}\n");
+        assert_eq!(got.len(), 1, "got {got:?}");
+    }
+
+    #[test]
+    fn dd_destination_is_its_of_operand() {
+        let got = write_findings("package() {\n  dd if=/dev/zero of=/dev/sda bs=1M\n}\n");
+        assert_eq!(got.len(), 1, "got {got:?}");
+        assert!(got[0].contains("/dev/sda"), "got {got:?}");
+        // if= is the input; it must not be reported as a write target.
+        assert!(!got[0].contains("/dev/zero"), "got {got:?}");
+    }
+
+    #[test]
+    fn single_operand_ln_links_into_cwd_and_is_not_a_system_write() {
+        let got = write_findings("package() {\n  ln -s /etc/hosts\n}\n");
+        assert!(got.is_empty(), "got {got:?}");
+
+        // Two operands: the link name is the destination.
+        let flagged = write_findings("package() {\n  ln -sf /dev/null /etc/resolv.conf\n}\n");
+        assert_eq!(flagged.len(), 1, "got {flagged:?}");
+        assert!(flagged[0].contains("/etc/resolv.conf"), "got {flagged:?}");
+    }
+
+    #[test]
+    fn install_d_creates_each_operand_as_a_directory() {
+        let got = write_findings("package() {\n  install -dm755 /etc/aurscan.d\n}\n");
+        assert_eq!(got.len(), 1, "got {got:?}");
+    }
+
+    #[test]
+    fn write_destinations_rules_are_per_command() {
+        assert_eq!(
+            write_destinations("install", &["-Dm644", "/dev/stdin", "$pkgdir/x"]),
+            vec!["$pkgdir/x"]
+        );
+        assert_eq!(
+            write_destinations("cp", &["a", "b", "/usr/lib"]),
+            vec!["/usr/lib"]
+        );
+        assert_eq!(
+            write_destinations("tee", &["/etc/a", "/etc/b"]),
+            vec!["/etc/a", "/etc/b"]
+        );
+        assert_eq!(
+            write_destinations("dd", &["if=/dev/zero", "of=/dev/sda"]),
+            vec!["/dev/sda"]
+        );
+        assert_eq!(
+            write_destinations("mv", &["--", "src", "/etc/dst"]),
+            vec!["/etc/dst"]
+        );
+        assert!(write_destinations("cp", &["only-one"]).is_empty());
+    }
 
     fn scan_str(content: &str, kind: ScriptKind) -> DetectorResult {
         let dir = tempfile::tempdir().unwrap();

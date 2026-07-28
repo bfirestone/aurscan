@@ -13,6 +13,8 @@ pub struct Engine {
     pub cache: Arc<dyn ResultCache>,
     pub policy: VerdictPolicy,
     pub ruleset_version: u32,
+    /// See `CacheKey::detector_epoch`.
+    pub detector_epoch: u32,
 }
 
 impl Engine {
@@ -42,6 +44,7 @@ impl Engine {
                         content_hash,
                         detector: d.id(),
                         ruleset_version: self.ruleset_version,
+                        detector_epoch: self.detector_epoch,
                     });
                 if let Some(k) = &key {
                     if let Some(hit) = self.cache.get(k) {
@@ -104,6 +107,7 @@ mod tests {
             cache: Arc::new(NoopCache),
             policy: VerdictPolicy::default(),
             ruleset_version: 1,
+            detector_epoch: 1,
         };
 
         let job = PackageJob {

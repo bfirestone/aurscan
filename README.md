@@ -107,7 +107,9 @@ aurscan update-lists
 
 ### `setup` — Configure paru integration and install the hook
 
-Install the paru.conf snippet for `PreBuildCommand` integration (stage 1 gates) and the pacman hook for artifact scanning (stage 3 gates). Idempotent; safe to re-run.
+Add the `PreBuildCommand` line to paru.conf (stage 1–2 gates) and install the pacman hook (stage 3 gates). Idempotent; safe to re-run.
+
+Use `--yes` to skip the prompt, or `--check` to report whether the gate is actually active without changing anything (exit 1 if it is not). The paru gate lives in per-user config and cannot be enabled by the package installer, so the pacman hook warns on every transaction while it is missing.
 
 ```bash
 aurscan setup
@@ -206,9 +208,9 @@ All subcommands support `--json` for machine-readable output. The schema documen
 
 Configuration and state files:
 
-- `~/.config/aurscan/paru.conf.snippet` — paru.conf PreBuildCommand snippet (written by `setup`)
+- `~/.config/paru/paru.conf` — `setup` adds the `[bin] PreBuildCommand` line here (paru's own config, not an aurscan file)
 - `~/.config/aurscan/acknowledged.toml` — acknowledged findings (auto-created)
-- `~/.cache/aurscan/scan-cache.redb` — content-hash cache (auto-created, safe to delete)
+- `~/.cache/aurscan/results.redb` — content-hash cache (auto-created, safe to delete)
 
 ## Integration with paru and pacman
 

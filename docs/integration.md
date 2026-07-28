@@ -17,35 +17,50 @@ Together, they provide defense-in-depth: scanner runs before PKGBUILD code execu
 
 paru v2.1.0 (and later) supports a `PreBuildCommand` configuration in `paru.conf`. When set, paru runs this command in the PKGBUILD directory before `makepkg` executes each package, and also if the build is skipped as already-built.
 
-`aurscan setup` writes to `~/.config/aurscan/paru.conf.snippet`:
+`aurscan setup` adds this to your paru.conf:
 
-```bash
-# paru.conf
-[options]
-PreBuildCommand = aurscan check --hook .
+```ini
+[bin]
+PreBuildCommand = /usr/bin/aurscan check --hook .
 ```
+
+> **The `[bin]` section is mandatory.** paru reads `PreBuildCommand` only from
+> `[bin]` (`man paru.conf`, BIN section). Placed under `[options]` — or any
+> other section — paru **silently ignores it**: no warning, no error, and
+> every AUR package builds unscanned while appearing configured. aurscan
+> v0.1.0 shipped this bug; if you configured it by hand back then, check with
+> `aurscan setup --check`.
 
 The `--hook` flag enables two behaviors:
 1. Stage 1: scan the PKGBUILD + .install scripts in the current directory
 2. Stage 2: run `makepkg --verifysource` (fetches sources, validates checksums, but executes no build code) and scan the fetched sources
 
-If findings Block, `aurscan` exits non-zero, aborting the package build. If Advisory, the hook prompts interactively (unless non-TTY); if allowed, paru continues.
+If findings Block, `aurscan` exits non-zero and paru aborts the build. If findings are Advisory, the hook prints them and **allows the build to continue** — it does not prompt, and does not block. See "Advisory findings in hook mode" below.
 
 ### paru.conf setup
 
-`aurscan setup` reads your paru.conf, appends the snippet, and writes it back:
-
 ```bash
-aurscan setup
+aurscan setup          # prompts before changing anything
+aurscan setup --yes    # non-interactive
+aurscan setup --check  # report status only; exit 1 if the gate is inactive
 ```
 
-Idempotent: re-running it is safe.
+Idempotent: re-running is safe.
 
-**Manual setup:** If you prefer, add this line to your `~/.config/paru/paru.conf`:
+`setup` also seeds a **newly created** user config with `Include = /etc/paru.conf`. paru resolves its config first-match-wins rather than merging (`$PARU_CONF` → `$XDG_CONFIG_HOME/paru/paru.conf` → `$HOME/.config/paru/paru.conf` → `/etc/paru.conf`), so creating a user config where none existed would otherwise silently disable your distro defaults — including `PgpFetch`, itself a security regression.
 
-```ini
-PreBuildCommand = aurscan check --hook .
+**Manual setup:** add the `[bin]` block above to `~/.config/paru/paru.conf`, then confirm with `aurscan setup --check`.
+
+### Verifying the gate is live
+
+The gate cannot be enabled by the package installer: it is per-user configuration, and `/etc/paru.conf` is owned by the paru package. Because a missing gate is otherwise invisible, the ALPM hook — which *is* installed automatically and runs on every pacman transaction — checks it and warns:
+
 ```
+==> aurscan: no PreBuildCommand in paru.conf -- AUR builds are not scanned before makepkg runs
+==> aurscan: run `aurscan setup` to enable pre-build scanning
+```
+
+The warning is advisory and never changes the transaction's exit status. A `PreBuildCommand` pointing at some *other* tool is reported but not warned about — that is a deliberate choice, not a misconfiguration.
 
 ### TOCTOU mitigation
 
@@ -55,13 +70,25 @@ This is not a guarantee (a compromised git repo can forge commits), but it catch
 
 ### Implementation notes
 
-**Verified behavior (paru v2.1.0):**
-- Non-zero exit from PreBuildCommand aborts paru's build of that package ✓
-- TTY is inherited: interactive prompts work in the hook ✓
-- `makepkg --verifysource` with VCS sources (e.g., `-git` packages) fetches `pkgver()` function results without executing the full build ✓
+**Measured behavior (paru v2.1.0, verified 2026-07-27 in a clean container):**
+
+| Behavior | Result |
+| --- | --- |
+| Non-zero exit aborts that package's build | **Yes.** paru exits 1 with `error: failed to run: sh -c <cmd>`; nothing is built or installed. |
+| Runs in the PKGBUILD directory | **Yes.** cwd is the clone dir, with `PKGBUILD` present. |
+| Runs even when the build is skipped as already-built | **Yes.** |
+| Also covers local `paru -U` builds | **Yes.** |
+| TTY is inherited | **Partly, and not usefully.** Under a real PTY the hook sees stdin as a TTY but **stdout is not** — paru captures it. |
+
+**Advisory findings in hook mode:**
+The hook never prompts. `gate.rs` gates prompting on `interactive && !hook && tty`, so hook mode is non-interactive by construction, independently of the TTY situation above. Advisory findings are printed and the build proceeds. Only Block aborts.
+
+To act on an Advisory finding, use `aurscan ack` to acknowledge it, or scan directly with `aurscan check <package>` outside the hook.
 
 **Multi-package builds:**
-If you install multiple packages (`paru -S pkg1 pkg2 pkg3`), paru runs PreBuildCommand for each. If one blocks, paru skips that package's build but continues with others (parallel/independent gating).
+`paru -S pkg1 pkg2 pkg3` runs PreBuildCommand per package, but the **first** failure aborts the whole transaction — remaining packages are neither scanned nor built. Verified with `paru -S worktrunk-bin 1password-cli` failing on the first: paru exited 1 and the second package was never touched. This is fail-closed, which is the safe direction, but it is not independent per-package gating.
+
+**`makepkg --verifysource` with VCS sources** (e.g. `-git` packages) fetches without executing the full build. This one is inherited from the original design and has **not** been re-verified empirically; treat it as a design assumption rather than a measured result.
 
 ## pacman hook integration
 
@@ -223,9 +250,14 @@ Acknowledgements auto-expire when the evidence changes (e.g., a URL is fixed, a 
 
 ## Caveats & known limitations
 
-### TTY inheritance in hooks
+### No interactive prompts in hook mode
 
-Both PreBuildCommand and the ALPM hook are run by paru and pacman in shell contexts. TTY inheritance is verified (interactive prompts work), but behavior may vary by shell, paru version, and pacman configuration. If prompts don't work, the hook defaults to blocking Advisory findings (conservative behavior).
+Neither PreBuildCommand nor the ALPM hook prompts. Two independent reasons:
+
+1. paru captures the hook's stdout, so it is not a TTY even when run from a terminal (stdin is; stdout is not). aurscan requires both before prompting.
+2. `gate.rs` disables prompting in hook mode outright (`interactive && !hook && tty`), so it would not prompt even with a full TTY.
+
+The practical consequence: **Block aborts the build, Advisory prints and proceeds.** There is no interactive override at the hook, and no "defaults to blocking Advisory" fallback — an earlier version of this document claimed one; it does not exist. Use `aurscan ack` to acknowledge advisories, or `aurscan install --allow` for a Block you have judged safe.
 
 ### VCS sources (-git packages)
 
@@ -264,21 +296,37 @@ ls -la /usr/share/libalpm/hooks/aurscan.hook
 
 If missing, re-run `sudo aurscan setup` or reinstall the aurscan AUR package.
 
-### Interactive prompts not working in hook
+### Scanning isn't happening at all
 
-If prompts show up during PreBuildCommand but not in the ALPM hook, pacman's hook environment may not inherit TTY. This is expected; the hook defaults to blocking Advisory findings (conservative behavior).
+Most often the `PreBuildCommand` is in the wrong paru.conf section, or a user config is shadowing the one you edited. Diagnose with:
 
-Workaround: use `aurscan install` wrapper (secondary UX) which runs in the foreground and supports interactive prompts.
+```bash
+aurscan setup --check
+```
+
+It reports which of these applies and exits non-zero when the gate is inactive:
+
+- `PreBuildCommand is under [options], but paru only reads it from [bin]` — move it
+- `no PreBuildCommand in paru.conf` — run `aurscan setup`
+- `no paru config found` — run `aurscan setup`
+
+Remember that paru reads only the **first** config it finds, so a `~/.config/paru/paru.conf` makes `/etc/paru.conf` irrelevant.
+
+### Prompts don't appear in the hook
+
+Expected — hook mode never prompts. See "No interactive prompts in hook mode" above.
+
+For an interactive flow, use the `aurscan install` wrapper, which runs in the foreground.
 
 ### Override a blocked package
 
-During interactive mode, use `--allow <package>`:
+`--allow` is a flag on `install` (not on `check`):
 
 ```bash
-aurscan check $PACKAGES --allow aspell-en
+aurscan install aspell-en --allow aspell-en
 ```
 
-This overrides Block verdicts for the specified package. Does not work in non-TTY/`--json` mode.
+This overrides Block verdicts for the named package. It is an explicit allow-list and works regardless of TTY — including under `--json` and in scripts.
 
 ## Security notes
 
