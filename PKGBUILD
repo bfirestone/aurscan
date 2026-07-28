@@ -6,17 +6,27 @@ pkgdesc="High-performance AUR package scanner with PKGBUILD and artifact malware
 arch=('x86_64')
 url="https://github.com/bfirestone/aurscan"
 license=('MIT')
-depends=('pacman')
+# glibc and gcc-libs are what the binary actually links against (namcap
+# flags them as implicitly satisfied otherwise). pacman is a runtime
+# dependency namcap cannot see: aurscan reads the local ALPM database for
+# `audit` and ships a libalpm hook.
+depends=('pacman' 'glibc' 'gcc-libs')
 optdepends=('paru: for paru-native PreBuildCommand integration')
 makedepends=('cargo' 'git')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-# SECURITY: 'SKIP' is a placeholder for the unreleased v0.1.0 state only.
-# Before publishing to the AUR, pin the real release-tarball checksum:
-#   makepkg -g >> PKGBUILD   # then replace the SKIP entry
-# Shipping a released package with SKIP defeats makepkg's source-integrity
-# check — the exact supply-chain gap this tool exists to catch. See the
-# bootstrap-trust note in README.md.
-sha256sums=('SKIP')
+# !lto is required, not a preference. Arch's stock makepkg.conf enables LTO,
+# which puts -flto=auto in CFLAGS. The tree-sitter crate builds its bundled C
+# core via the cc crate, so those objects become LTO bitcode -- but rustc
+# drives the final link with lld and has no matching plugin setup, so every
+# ts_* symbol comes back undefined. `cargo build` never sees these flags, so
+# this only reproduces under makepkg.
+options=('!lto')
+# Sources the uploaded release asset, not GitHub's /archive/ URL. Those
+# tarballs are generated on demand rather than stored, and a 2023 change to
+# GitHub's tar/gzip settings silently altered their checksums, breaking
+# PKGBUILDs across several distros. An uploaded asset is a fixed byte string.
+# Rebuild it with: git archive --format=tar.gz --prefix=$pkgname-$pkgver/ v$pkgver
+source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+sha256sums=('5f597fb3ab7afb1aa11e003e393341a40dee99ac4d17b8edc2bab5920799f912')
 
 build() {
 	cd "$pkgname-$pkgver"

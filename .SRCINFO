@@ -8,8 +8,11 @@ pkgbase = aurscan
 	makedepends = cargo
 	makedepends = git
 	depends = pacman
+	depends = glibc
+	depends = gcc-libs
 	optdepends = paru: for paru-native PreBuildCommand integration
-	source = aurscan-0.1.0.tar.gz::https://github.com/bfirestone/aurscan/archive/v0.1.0.tar.gz
-	sha256sums = SKIP
+	options = !lto
+	source = https://github.com/bfirestone/aurscan/releases/download/v0.1.0/aurscan-0.1.0.tar.gz
+	sha256sums = 5f597fb3ab7afb1aa11e003e393341a40dee99ac4d17b8edc2bab5920799f912
 
 pkgname = aurscan
