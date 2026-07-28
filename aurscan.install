@@ -1,0 +1,45 @@
+# Post-install notice for the aurscan package.
+#
+# Deliberately does NOT configure paru. The PreBuildCommand gate lives in
+# per-user config, and this script runs as root during the pacman
+# transaction with no reliable way to know which users use paru. Writing to
+# /etc/paru.conf would modify a file owned by the paru package (a packaging
+# guideline violation that also loses to any user config, since paru reads
+# only the first config it finds).
+#
+# The ALPM hook installed by this package IS automatic, and it warns on
+# every transaction while the paru gate is inactive -- so a user who never
+# reads this message still finds out.
+
+_notice() {
+	cat <<'EOF'
+
+==> aurscan: the pacman hook is active now (built packages are scanned
+    before install). No action needed for that part.
+
+==> To also scan PKGBUILDs and sources BEFORE makepkg executes them, enable
+    the paru gate:
+
+        aurscan setup
+
+    Check it at any time with:
+
+        aurscan setup --check
+
+==> Bootstrap trust: aurscan arrives through the AUR, the same channel it
+    scans. Verify this install manually before relying on it.
+
+EOF
+}
+
+post_install() {
+	_notice
+}
+
+post_upgrade() {
+	# Re-check on upgrade: a paru upgrade can leave a .pacnew and revert the
+	# user's paru.conf, silently disabling the gate.
+	if ! /usr/bin/aurscan setup --check >/dev/null 2>&1; then
+		_notice
+	fi
+}

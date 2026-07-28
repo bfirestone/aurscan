@@ -9,6 +9,7 @@ mod fetch;
 mod flow;
 mod gate;
 mod lists;
+mod paru_conf;
 mod registry;
 mod report;
 mod setup;
@@ -61,13 +62,19 @@ fn main() {
                 3
             }
         },
-        Cmd::Setup => match setup::run() {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("error: {e:#}");
-                3
+        Cmd::Setup { yes, check } => {
+            if check {
+                setup::check()
+            } else {
+                match setup::run(yes) {
+                    Ok(()) => 0,
+                    Err(e) => {
+                        eprintln!("error: {e:#}");
+                        3
+                    }
+                }
             }
-        },
+        }
     };
 
     std::process::exit(code);

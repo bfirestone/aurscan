@@ -70,6 +70,7 @@ pub fn scan_files(
 /// resolves to an existing built archive, and exit non-interactively (no
 /// prompts -- stdin is consumed by the hook contract, not a tty).
 pub fn hook_main() -> i32 {
+    warn_if_paru_gate_inactive();
     let cfg = Config::load();
     let lines: Vec<String> = std::io::stdin()
         .lock()
@@ -77,6 +78,27 @@ pub fn hook_main() -> i32 {
         .map_while(Result::ok)
         .collect();
     hook_scan_paths(&lines, &cfg)
+}
+
+/// Warn, on every pacman transaction, when the paru `PreBuildCommand` gate
+/// is not actually live.
+///
+/// This runs here because the ALPM hook is the only part of the integration
+/// that is automatic -- it is installed by the package and fires on every
+/// transaction, with no user action. The paru gate cannot be enabled from a
+/// package install (it is per-user config, and `/etc/paru.conf` belongs to
+/// the paru package), so the next best thing is to make its *absence*
+/// impossible to miss.
+///
+/// Deliberately advisory: it never changes the exit code. The hook carries
+/// `AbortOnFail`, so returning non-zero here would abort unrelated pacman
+/// transactions on any machine that merely has aurscan installed.
+fn warn_if_paru_gate_inactive() {
+    let status = crate::paru_conf::status_for_invoking_user();
+    if status.should_warn() {
+        eprintln!("==> aurscan: {}", status.describe());
+        eprintln!("==> aurscan: run `aurscan setup` to enable pre-build scanning");
+    }
 }
 
 /// Stdin-free seam for `hook_main`: resolve each of `lines` to a built

@@ -47,5 +47,12 @@ pub enum Cmd {
     /// Refresh the bundled compromised-package lists.
     UpdateLists,
     /// Install the pacman hook and initial configuration.
-    Setup,
+    Setup {
+        /// Apply changes without prompting.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Report whether the paru gate is active and exit; change nothing.
+        #[arg(long, conflicts_with = "yes")]
+        check: bool,
+    },
 }

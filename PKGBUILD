@@ -12,6 +12,7 @@ license=('MIT')
 # `audit` and ships a libalpm hook.
 depends=('pacman' 'glibc' 'gcc-libs')
 optdepends=('paru: for paru-native PreBuildCommand integration')
+install="$pkgname.install"
 makedepends=('cargo' 'git')
 # Arch's stock makepkg.conf enables LTO, putting -flto=auto in CFLAGS. The
 # tree-sitter crate builds its bundled C core through the cc crate, so those
