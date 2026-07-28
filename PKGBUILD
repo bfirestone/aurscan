@@ -13,12 +13,21 @@ license=('MIT')
 depends=('pacman' 'glibc' 'gcc-libs')
 optdepends=('paru: for paru-native PreBuildCommand integration')
 makedepends=('cargo' 'git')
-# !lto is required, not a preference. Arch's stock makepkg.conf enables LTO,
-# which puts -flto=auto in CFLAGS. The tree-sitter crate builds its bundled C
-# core via the cc crate, so those objects become LTO bitcode -- but rustc
-# drives the final link with lld and has no matching plugin setup, so every
-# ts_* symbol comes back undefined. `cargo build` never sees these flags, so
-# this only reproduces under makepkg.
+# Arch's stock makepkg.conf enables LTO, putting -flto=auto in CFLAGS. The
+# tree-sitter crate builds its bundled C core through the cc crate, so those
+# objects become GCC LTO bitcode -- which the linker rustc invokes (lld, per
+# the "ld.lld: error: undefined symbol: ts_*" failure) cannot consume. Without
+# one of the two fixes below, the package does not build. `cargo build` never
+# sees makepkg's flags, so this reproduces only under makepkg.
+#
+# Two established fixes exist in Arch packaging:
+#   options=('!lto')                -- helix, difftastic (both Rust+tree-sitter)
+#   CFLAGS+=' -ffat-lto-objects'    -- zed, gitui (keeps LTO on)
+#
+# We take the first. Measured on v0.1.0, the two produce binaries within 512
+# bytes of each other (0.006%): the only C here is tree-sitter's self-contained
+# parser, so there is nothing meaningful for LTO to do across it. Rust-side LTO
+# is a Cargo profile setting and is unaffected by this either way.
 options=('!lto')
 # Sources the uploaded release asset, not GitHub's /archive/ URL. Those
 # tarballs are generated on demand rather than stored, and a 2023 change to
