@@ -1,3 +1,7 @@
 target/
 __pycache__/
 *.pkg.tar.zst
+
+# Release tarballs are generated for upload, not stored:
+#   git archive --format=tar.gz --prefix=$pkgname-$pkgver/ v$pkgver
+aurscan-*.tar.gz
