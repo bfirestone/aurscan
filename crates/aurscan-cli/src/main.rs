@@ -23,6 +23,18 @@ fn main() {
     let cli = Cli::parse();
     let cfg = Config::load();
 
+    // Size the rayon pool before anything scans (build_global is
+    // first-caller-wins). Hooks run behind an interactive pacman/paru
+    // session, so they get half the cores by default; see
+    // Config::effective_scan_threads.
+    let hook_mode = matches!(
+        cli.cmd,
+        Cmd::Check { hook: true, .. } | Cmd::ScanArtifact { hook: true, .. }
+    );
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(cfg.effective_scan_threads(hook_mode))
+        .build_global();
+
     let code = match cli.cmd {
         Cmd::Check { targets, hook } => {
             let (paths, names): (Vec<String>, Vec<String>) = targets

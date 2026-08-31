@@ -20,6 +20,7 @@ clap.workspace = true
 ureq.workspace = true
 dirs.workspace = true
 walkdir.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

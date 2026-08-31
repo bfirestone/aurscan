@@ -48,7 +48,20 @@ pub fn scan_files(
         }
     }
 
-    let mut reports = engine.scan(&jobs);
+    // Sequential over packages, parallel over each package's targets. One
+    // archive expands to hundreds of member targets, which is what actually
+    // saturates the pool -- and a sequential outer loop lets the progress
+    // line name what is being worked on. pacman's hook Description is static
+    // text printed before we run, so this is the only place a count can
+    // come from.
+    let total = jobs.len();
+    let mut reports = Vec::with_capacity(total);
+    for (i, job) in jobs.iter().enumerate() {
+        if total > 1 {
+            eprintln!("==> aurscan: scanning ({}/{total}) {}", i + 1, job.name);
+        }
+        reports.push(engine.scan_package(job));
+    }
     if !cfg.record_features {
         for r in &mut reports {
             r.features.clear();

@@ -95,6 +95,7 @@ dependencies = [
  "blake3",
  "clap",
  "dirs",
+ "rayon",
  "serde",
  "serde_json",
  "tar",

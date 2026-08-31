@@ -16,6 +16,9 @@ pub struct Config {
     pub record_features: bool,
     /// Skip the persistent redb result cache.
     pub no_cache: bool,
+    /// Scan worker threads. 0 (the default) picks automatically: half the
+    /// available cores in hook mode, all of them otherwise.
+    pub scan_threads: usize,
 }
 
 impl Default for Config {
@@ -25,6 +28,7 @@ impl Default for Config {
             advisory_at: "medium".to_string(),
             record_features: false,
             no_cache: false,
+            scan_threads: 0,
         }
     }
 }
@@ -38,6 +42,25 @@ impl Config {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|s| toml::from_str(&s).ok())
             .unwrap_or_default()
+    }
+
+    /// Number of rayon workers to use for scanning. Hooks run behind a
+    /// user's interactive pacman/paru session and were pinning every core
+    /// (90C+ on a real -Syu), so hook mode defaults to half the cores;
+    /// direct CLI invocations keep full parallelism. `scan_threads` in
+    /// config.toml overrides both.
+    pub fn effective_scan_threads(&self, hook: bool) -> usize {
+        if self.scan_threads > 0 {
+            return self.scan_threads;
+        }
+        let cores = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1);
+        if hook {
+            (cores / 2).max(1)
+        } else {
+            cores
+        }
     }
 
     /// Translate the configured severity strings into an engine policy.
