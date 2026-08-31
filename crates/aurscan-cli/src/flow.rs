@@ -53,20 +53,72 @@ pub fn scan_dir_pipeline(
 }
 
 /// Clone `info`'s pkgbase, verify its sources, and scan both through
-/// `scan_dir_pipeline`. Records the scanned commit best-effort for the
-/// ALPM-hook task's TOCTOU check.
+/// `scan_dir_pipeline` -- unless the AUR's current commit already scanned
+/// Clean under the current ruleset + detector epoch, in which case one
+/// `git ls-remote` round-trip replaces the whole fetch. The clone and
+/// `makepkg --verifysource` are where a repeat scan's network and
+/// wall-clock cost live; the redb result cache cannot help there because
+/// you must *have* the content to hash it.
 fn fetch_and_scan(info: &AurInfo, cfg: &Config) -> anyhow::Result<Vec<PackageReport>> {
+    let mut ledger = crate::commit_ledger::CommitLedger::load();
+    let (ruleset_version, detector_epoch) = registry::cache_identity();
+
+    let remote_head = if cfg.no_cache {
+        None
+    } else {
+        fetch::remote_head(&info.package_base).ok()
+    };
+    if let Some(head) = &remote_head {
+        if ledger.clean_at(&info.package_base, head, ruleset_version, detector_epoch) {
+            eprintln!(
+                "==> aurscan: {} unchanged since its last clean scan ({}), fetch skipped",
+                info.name,
+                &head[..7.min(head.len())]
+            );
+            return Ok(vec![PackageReport {
+                package: info.name.clone(),
+                verdict: aurscan_core::Verdict::Clean,
+                findings: Vec::new(),
+                features: Vec::new(),
+            }]);
+        }
+    }
+
     let dir = fetch::sync_pkgbase(&info.package_base)?;
-    record_scanned_commit(&info.package_base, &dir);
     let source_files = fetch::verifysource(&dir)?;
-    scan_dir_pipeline(
+    let reports = scan_dir_pipeline(
         &dir,
         &info.name,
         &info.version,
         Some(info.to_metadata()),
         &source_files,
         cfg,
-    )
+    )?;
+
+    // Record *after* scanning, with the verdict: the pre-ledger version of
+    // this wrote the commit before the scan ran, so it could never say
+    // whether the commit was safe to skip.
+    if let Ok(commit) = fetch::head_commit(&dir) {
+        ledger.record(
+            &info.package_base,
+            crate::commit_ledger::Entry {
+                commit,
+                verdict: worst_verdict_label(&reports).to_string(),
+                ruleset_version,
+                detector_epoch,
+            },
+        );
+    }
+    Ok(reports)
+}
+
+/// The worst verdict across `reports`, as the ledger's label.
+fn worst_verdict_label(reports: &[PackageReport]) -> &'static str {
+    match report::worst_exit_code(reports) {
+        2 => "block",
+        1 => "advisory",
+        _ => "clean",
+    }
 }
 
 /// `check <name>...`: resolve the AUR dependency tree, clone each pkgbase,
@@ -160,32 +212,6 @@ fn run_paru_install(names: &[&str]) -> i32 {
             eprintln!("error: failed to launch paru: {e:#}");
             3
         }
-    }
-}
-
-/// Best-effort record of `pkgbase`'s scanned `HEAD` commit, consumed by the
-/// ALPM hook's TOCTOU check. Failures (unwritable cache dir, git error) are
-/// silently ignored -- this is advisory bookkeeping, not part of the gate.
-fn record_scanned_commit(pkgbase: &str, dir: &Path) {
-    let Ok(commit) = fetch::head_commit(dir) else {
-        return;
-    };
-    let Some(path) = dirs::cache_dir().map(|d| d.join("aurscan/scanned_commits.json")) else {
-        return;
-    };
-    let mut commits: std::collections::HashMap<String, String> = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    commits.insert(pkgbase.to_string(), commit);
-
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-    }
-    if let Ok(json) = serde_json::to_string_pretty(&commits) {
-        let _ = std::fs::write(&path, json);
     }
 }
 

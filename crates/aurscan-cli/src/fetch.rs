@@ -37,6 +37,25 @@ pub fn sync_pkgbase(base: &str) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
+/// The AUR repo's current remote `HEAD` for `base`, via one `git ls-remote`
+/// round-trip -- no clone, no fetch. This is the cheap question the skip
+/// path asks before paying for `sync_pkgbase` + `verifysource`. Trusting it
+/// is the same assumption as cloning from the same host, so it adds no new
+/// exposure; the caller must still never skip unless the recorded verdict
+/// was Clean.
+pub fn remote_head(base: &str) -> anyhow::Result<String> {
+    let out = run(Command::new("git").args([
+        "ls-remote",
+        &format!("https://aur.archlinux.org/{base}.git"),
+        "HEAD",
+    ]))?;
+    out.split_whitespace()
+        .next()
+        .filter(|sha| sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("unexpected ls-remote output for {base}: {out:?}"))
+}
+
 /// The checkout's current `HEAD` commit.
 pub fn head_commit(dir: &Path) -> anyhow::Result<String> {
     let out = run(Command::new("git")

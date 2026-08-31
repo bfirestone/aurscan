@@ -62,11 +62,28 @@ The gate cannot be enabled by the package installer: it is per-user configuratio
 
 The warning is advisory and never changes the transaction's exit status. A `PreBuildCommand` pointing at some *other* tool is reported but not warned about — that is a deliberate choice, not a misconfiguration.
 
-### TOCTOU mitigation
+### The scanned-commit ledger
 
-The `aurscan install` wrapper (secondary UX) records the git commit SHA of each scanned PKGBUILD. When the wrapper delegates to paru, paru's PreBuildCommand re-scans that same commit. If HEAD has changed, the hook warns about the mismatch and rechecks, ensuring we don't build a different version than scanned.
+Every name-based `check`/`install` scan records its outcome in
+`~/.cache/aurscan/scanned_commits.json`: the pkgbase's git commit, the
+verdict, and the ruleset version + detector epoch it was scanned under.
 
-This is not a guarantee (a compromised git repo can forge commits), but it catches accidental changes and some attack vectors.
+On the next scan of the same package, one `git ls-remote` round-trip fetches
+the AUR's current HEAD. If that exact commit is recorded **Clean** at the
+current ruleset + epoch, the clone and `makepkg --verifysource` are skipped —
+that fetch is where a repeat scan's network and wall-clock cost live, and the
+redb result cache cannot help there because content must be fetched before it
+can be hashed. Any other recorded verdict, a moved commit, or a detector/
+ruleset change falls through to the full fetch and scan. `--no-cache`
+disables the skip.
+
+The identity is deliberately the git commit, never `pkgname+pkgver`: nothing
+forces a maintainer to bump pkgver when the PKGBUILD changes, `-git` packages
+compute pkgver at build time, and "version stable while content changes" is
+the orphan-adoption attack this tool exists to catch. Trusting `ls-remote` is
+the same assumption as cloning from the same host. paru's own PreBuildCommand
+still re-scans the actual cloned directory before every build, so a skip in
+the name-based flow never bypasses the pre-build gate.
 
 ### Implementation notes
 

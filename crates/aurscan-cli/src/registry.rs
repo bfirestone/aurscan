@@ -51,6 +51,16 @@ pub fn build_engine(cfg: &Config) -> anyhow::Result<Engine> {
     })
 }
 
+/// The scan-identity pair for the current binary + on-disk ruleset. Any
+/// cached result (redb entries, the commit ledger) is only valid at a
+/// matching pair.
+pub fn cache_identity() -> (u32, u32) {
+    let ruleset_version = rules::RuleSet::load(dirs::data_dir().as_deref())
+        .map(|r| r.version)
+        .unwrap_or(0);
+    (ruleset_version, aurscan_detectors::DETECTOR_EPOCH)
+}
+
 /// Scan local path targets (directories or files) through the full engine.
 /// Non-existent paths are skipped here; the caller reports them separately.
 pub fn run_check(paths: &[String], cfg: &Config) -> anyhow::Result<(Vec<PackageReport>, i32)> {

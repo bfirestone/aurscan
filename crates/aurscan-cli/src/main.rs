@@ -3,6 +3,7 @@ mod artifact;
 mod audit;
 mod aur_rpc;
 mod cli;
+mod commit_ledger;
 mod config;
 mod corpus;
 mod fetch;
