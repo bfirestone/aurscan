@@ -113,25 +113,44 @@ fn warn_if_paru_gate_inactive() {
 /// also proceed: an aurscan defect must not brick unrelated transactions.
 pub fn hook_scan_paths(lines: &[String], cfg: &Config, dirs: &HookSearchDirs) -> i32 {
     let mut paths = Vec::new();
-    let mut unresolved: Vec<&str> = Vec::new();
+    let mut names: Vec<&str> = Vec::new();
     for line in lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
-        match resolve_target(line, dirs) {
-            Some(p) => paths.push(p),
-            None => unresolved.push(line),
+        if Path::new(line).is_absolute() {
+            paths.extend(resolve_target(line, dirs));
+        } else {
+            names.push(line);
         }
     }
 
-    // A repo package that misses is unremarkable (custom CacheDir, cleaned
-    // cache); it was signed and verified by pacman anyway. A *foreign*
-    // package we cannot find is the scanner's entire target population
-    // going unscanned, and must never look like a pass.
-    for name in unresolved {
-        if !in_sync_repos(name) {
-            eprintln!(
+    // The trigger is Target = *, so a full `-Syu` hands the hook every repo
+    // upgrade too. Those are signature-verified by pacman and outside this
+    // tool's threat model; ELF-inspecting a few hundred of them made a real
+    // `paru -Syyu` crawl. One batched query splits the names, and only the
+    // foreign remainder is scanned.
+    let repo = sync_repo_members(&names);
+    let mut skipped = 0usize;
+    for name in names {
+        if repo.contains(name) {
+            skipped += 1;
+            continue;
+        }
+        match resolve_target(name, dirs) {
+            Some(p) => paths.push(p),
+            // A foreign package we cannot find is the scanner's entire
+            // target population going unscanned; never let it look like a
+            // pass.
+            None => eprintln!(
                 "==> aurscan: could not locate a built archive for foreign package `{name}`; \
                  it was NOT scanned"
-            );
+            ),
         }
+    }
+    if skipped > 0 {
+        eprintln!(
+            "==> aurscan: {skipped} repo package(s) skipped (signature-verified by pacman); \
+             scanning {} foreign",
+            paths.len()
+        );
     }
 
     if paths.is_empty() {
@@ -258,20 +277,38 @@ fn mtime(path: &Path) -> std::time::SystemTime {
         .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
 }
 
-/// Whether `name` exists in the configured sync repos, via `pacman -Si`
-/// (read-only; takes no database lock, so it is safe from inside a hook).
-/// On any failure to ask, assume it is a repo package -- the warning this
-/// gates must not fire spuriously on every transaction of a broken system.
-fn in_sync_repos(name: &str) -> bool {
-    Command::new("pacman")
+/// The subset of `names` present in the configured sync repos, in one
+/// `pacman -Si` spawn (read-only; takes no database lock, so it is safe
+/// from inside a hook). `LC_ALL=C` pins the field labels the parser reads.
+/// If the query cannot run at all, the set is empty and every name is
+/// treated as foreign: the failure direction is "scan too much", never
+/// "skip a foreign package".
+fn sync_repo_members(names: &[&str]) -> std::collections::HashSet<String> {
+    if names.is_empty() {
+        return Default::default();
+    }
+    let output = Command::new("pacman")
         .arg("-Si")
         .arg("--")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
+        .args(names)
+        .env("LC_ALL", "C")
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(true)
+        .output();
+    match output {
+        Ok(o) => parse_si_names(&String::from_utf8_lossy(&o.stdout)),
+        Err(_) => Default::default(),
+    }
+}
+
+/// Package names out of `pacman -Si` output: the `Name : value` fields.
+fn parse_si_names(stdout: &str) -> std::collections::HashSet<String> {
+    stdout
+        .lines()
+        .filter_map(|l| {
+            let (key, value) = l.split_once(':')?;
+            (key.trim() == "Name").then(|| value.trim().to_string())
+        })
+        .collect()
 }
 
 fn is_pkg_archive(path: &Path) -> bool {
@@ -539,6 +576,15 @@ mod tests {
         let lines = vec![path.display().to_string()];
         let dirs = dirs_with(Path::new("/nonexistent"), None);
         assert_eq!(hook_scan_paths(&lines, &test_cfg(), &dirs), 2);
+    }
+
+    #[test]
+    fn si_output_parses_to_the_set_of_repo_names() {
+        let out = "Repository      : extra\nName            : bash\nVersion         : 5.2\n\n\
+                   Repository      : core\nName            : linux\nVersion         : 6.18\n";
+        let got = parse_si_names(out);
+        assert!(got.contains("bash") && got.contains("linux"));
+        assert_eq!(got.len(), 2, "field values with colons must not leak in");
     }
 
     #[test]

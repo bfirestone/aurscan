@@ -102,8 +102,13 @@ The hook:
 - Runs before pacman modifies the filesystem
 - Reads the target package *names* from stdin (`Type = Package` hooks receive
   names, never archive paths, regardless of how the install was invoked)
-- Resolves each name to a built `.pkg.tar.zst`: pacman's download cache
-  (`/var/cache/pacman/pkg/`, repo packages), then the invoking user's paru
+- Skips names found in the sync repos (one batched `LC_ALL=C pacman -Si`
+  query, read-only): pacman already verified their signatures, and scanning
+  every repo upgrade made a full `-Syu` crawl. A summary line reports the
+  skip count. If the query cannot run, everything is treated as foreign —
+  the failure direction is scan-too-much, never skip-a-foreign-package.
+- Resolves each remaining (foreign) name to a built `.pkg.tar.zst`: pacman's
+  download cache (`/var/cache/pacman/pkg/`), then the invoking user's paru
   clone cache (`~/.cache/paru/clone/`, via `SUDO_USER` — AUR builds installed
   with `pacman -U` never enter pacman's cache), then `PKGDEST` from
   makepkg.conf. Several cached versions resolve to the newest build.
