@@ -39,6 +39,15 @@ pub enum Cmd {
         #[arg(long)]
         hook: bool,
     },
+    /// Acknowledge current findings for packages so they stop prompting and
+    /// gating until their matched content changes.
+    Ack {
+        /// Package names, build directories, or built .pkg.tar.zst archives.
+        targets: Vec<String>,
+        /// Acknowledge without prompting (required when not at a terminal).
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
     /// Audit an installed system for compromise artifacts.
     Audit {
         #[arg(long, default_value = "/")]

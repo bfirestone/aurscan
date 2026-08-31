@@ -40,7 +40,7 @@ pub fn hook_exit_code(code: i32) -> i32 {
     if !std::io::stdin().is_terminal() {
         eprintln!(
             "==> aurscan: advisory findings above do not abort the build; \
-             run `aurscan ack` to acknowledge them"
+             run `aurscan ack <package>` to silence reviewed findings"
         );
         return 0;
     }
@@ -94,8 +94,8 @@ pub fn decide(
                     }
                 } else if hook {
                     eprintln!(
-                        "note: {} has advisory findings; run `aurscan check {}` to review or `aurscan ack` to acknowledge",
-                        report.package, report.package
+                        "note: {0} has advisory findings; run `aurscan check {0}` to review or `aurscan ack {0}` to acknowledge",
+                        report.package
                     );
                 }
             }

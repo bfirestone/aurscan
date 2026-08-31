@@ -8,7 +8,7 @@ use crate::config::Config;
 use crate::registry;
 use crate::report;
 use aurscan_core::target::expand_archive;
-use aurscan_core::PackageJob;
+use aurscan_core::{PackageJob, PackageReport};
 use std::io::{BufRead, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,13 +27,39 @@ pub fn scan_files(
     no_color: bool,
     verbose: bool,
 ) -> i32 {
-    let engine = match registry::build_engine(cfg) {
-        Ok(e) => e,
+    let mut reports = match collect_reports(paths, cfg, true) {
+        Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e:#}");
             return 3;
         }
     };
+
+    let acks = AckStore::load();
+    crate::ack::apply_acks(&mut reports, &acks, &cfg.policy());
+    if json {
+        let value = report::render_json(&reports);
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
+    } else {
+        let color = !no_color && std::io::stdout().is_terminal();
+        print!("{}", report::render_text(&reports, &acks, verbose, color));
+    }
+
+    report::worst_exit_code(&reports)
+}
+
+/// Scan built archives through the full engine and return the raw reports.
+/// Sequential over packages, parallel over each package's targets: one
+/// archive expands to hundreds of member targets, which is what actually
+/// saturates the pool -- and a sequential outer loop lets the progress line
+/// name what is being worked on. pacman's hook Description is static text
+/// printed before we run, so this is the only place a count can come from.
+pub fn collect_reports(
+    paths: &[PathBuf],
+    cfg: &Config,
+    progress: bool,
+) -> anyhow::Result<Vec<PackageReport>> {
+    let engine = registry::build_engine(cfg)?;
 
     let mut jobs = Vec::new();
     for path in paths {
@@ -48,16 +74,10 @@ pub fn scan_files(
         }
     }
 
-    // Sequential over packages, parallel over each package's targets. One
-    // archive expands to hundreds of member targets, which is what actually
-    // saturates the pool -- and a sequential outer loop lets the progress
-    // line name what is being worked on. pacman's hook Description is static
-    // text printed before we run, so this is the only place a count can
-    // come from.
     let total = jobs.len();
     let mut reports = Vec::with_capacity(total);
     for (i, job) in jobs.iter().enumerate() {
-        if total > 1 {
+        if progress && total > 1 {
             eprintln!("==> aurscan: scanning ({}/{total}) {}", i + 1, job.name);
         }
         reports.push(engine.scan_package(job));
@@ -67,17 +87,7 @@ pub fn scan_files(
             r.features.clear();
         }
     }
-
-    let acks = AckStore::load();
-    if json {
-        let value = report::render_json(&reports);
-        println!("{}", serde_json::to_string_pretty(&value).unwrap());
-    } else {
-        let color = !no_color && std::io::stdout().is_terminal();
-        print!("{}", report::render_text(&reports, &acks, verbose, color));
-    }
-
-    report::worst_exit_code(&reports)
+    Ok(reports)
 }
 
 /// The ALPM hook entry point: read target lines from stdin, scan whatever
@@ -174,7 +184,7 @@ pub fn hook_scan_paths(lines: &[String], cfg: &Config, dirs: &HookSearchDirs) ->
         1 => {
             eprintln!(
                 "==> aurscan: advisory findings above do not abort the install; \
-                 run `aurscan ack` to acknowledge them"
+                 run `aurscan ack <package>` to silence reviewed findings"
             );
             0
         }
@@ -247,7 +257,7 @@ fn pkgdest_from_makepkg_conf(content: &str) -> Option<PathBuf> {
 /// line as a `pkgname` and search the known build/cache locations for the
 /// most recently modified `<pkgname>-*.pkg.tar.zst` (paru caches several
 /// versions side by side; the one being installed is the newest build).
-fn resolve_target(line: &str, dirs: &HookSearchDirs) -> Option<PathBuf> {
+pub(crate) fn resolve_target(line: &str, dirs: &HookSearchDirs) -> Option<PathBuf> {
     let candidate = Path::new(line);
     if candidate.is_absolute() {
         return (is_pkg_archive(candidate) && candidate.is_file()).then(|| candidate.to_path_buf());

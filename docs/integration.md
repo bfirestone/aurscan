@@ -85,7 +85,7 @@ An Advisory prompts **[y/N]** when stdin is a terminal. The prompt is written to
 
 An earlier gate exited 1 on every Advisory, which paru treats as failure: one Medium finding on one package (observed: `1password`, `eval` of a heredoc in `package()`) aborted a whole 27-package upgrade with the report unhelpfully headed `.:` (fixed: reports are named from the PKGBUILD's `pkgname`).
 
-To silence a reviewed Advisory permanently, use `aurscan ack` to acknowledge it, or scan directly with `aurscan check <package>` outside the hook.
+To silence a reviewed Advisory permanently, run `aurscan ack <package>` (it resolves the recipe and the built artifact by bare name and records both after a y/N confirm; `--yes` for scripts), or scan directly with `aurscan check <package>` outside the hook.
 
 **Multi-package builds:**
 `paru -S pkg1 pkg2 pkg3` runs PreBuildCommand per package, but the **first** failure aborts the whole transaction — remaining packages are neither scanned nor built. Verified with `paru -S worktrunk-bin 1password-cli` failing on the first: paru exited 1 and the second package was never touched. This is fail-closed, which is the safe direction, but it is not independent per-package gating.
@@ -276,7 +276,7 @@ Neither PreBuildCommand nor the ALPM hook prompts. Two independent reasons:
 1. paru captures the hook's stdout, so it is not a TTY even when run from a terminal (stdin is; stdout is not). aurscan requires both before prompting.
 2. `gate.rs` disables prompting in hook mode outright (`interactive && !hook && tty`), so it would not prompt even with a full TTY.
 
-The practical consequence: **Block aborts the build; Advisory prompts [y/N] at a terminal and proceeds unattended.** There is no interactive override for a Block at the hook. Use `aurscan ack` to acknowledge advisories, or `aurscan install --allow` for a Block you have judged safe.
+The practical consequence: **Block aborts the build; Advisory prompts [y/N] at a terminal and proceeds unattended.** There is no interactive override for a Block at the hook. Use `aurscan ack <package>` to acknowledge advisories — acks survive version bumps and expire when the matched content changes, or `aurscan install --allow` for a Block you have judged safe.
 
 ### VCS sources (-git packages)
 

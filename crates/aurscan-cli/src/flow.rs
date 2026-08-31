@@ -94,6 +94,7 @@ pub fn run_check_names(
         }
     }
 
+    crate::ack::apply_acks(&mut reports, &AckStore::load(), &cfg.policy());
     render(&reports, json, no_color, verbose);
     report::worst_exit_code(&reports)
 }
@@ -127,6 +128,9 @@ pub fn run_install(
         }
     }
 
+    // Acked findings must not gate: without this, an acknowledged advisory
+    // still prompted on every install.
+    crate::ack::apply_acks(&mut reports, &AckStore::load(), &cfg.policy());
     render(&reports, json, no_color, verbose);
 
     match gate::decide(&reports, allow, true, false) {

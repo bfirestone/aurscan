@@ -67,6 +67,7 @@ pub fn run_check(paths: &[String], cfg: &Config) -> anyhow::Result<(Vec<PackageR
         }
     }
 
+    crate::ack::apply_acks(&mut reports, &crate::ack::AckStore::load(), &cfg.policy());
     let code = report::worst_exit_code(&reports);
     Ok((reports, code))
 }

@@ -74,6 +74,16 @@ fn main() {
                 artifact::scan_files(&paths, &cfg, cli.json, cli.no_color, cli.verbose)
             }
         }
+        Cmd::Ack { targets, yes } => {
+            if targets.is_empty() {
+                eprintln!(
+                    "aurscan: name at least one package, build dir, or archive to acknowledge"
+                );
+                3
+            } else {
+                ack::run_ack(&targets, yes, &cfg)
+            }
+        }
         Cmd::Audit { root } => audit::run_audit(std::path::Path::new(&root), &cfg),
         Cmd::UpdateLists => match lists::update() {
             Ok(()) => 0,
