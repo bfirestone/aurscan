@@ -13,6 +13,50 @@
 use aurscan_core::{PackageReport, Verdict};
 use std::io::{IsTerminal, Write};
 
+/// Map a `check` exit code to the paru `PreBuildCommand` contract. paru
+/// aborts the build on any non-zero exit, so a raw Advisory (1) means one
+/// Medium finding on one legitimate package kills a whole `-Syyu` (observed
+/// with tilt-bin).
+///
+/// On an interactive terminal an Advisory asks whether to proceed.
+/// Declining (or plain Enter) aborts that build. Without a terminal there
+/// is nobody to ask, so print the note and proceed -- aborting there would
+/// just re-create the tilt-bin failure for every scripted update.
+///
+/// The tty test is stdin-only and the prompt goes to *stderr*: paru
+/// captures the hook's stdout but passes stdin through as the terminal
+/// (verified against paru v2.1.0; see docs/integration.md), so a
+/// stdout-gated prompt would never fire under the one caller this exists
+/// for.
+///
+/// Block stays 2. Scan errors stay non-zero, unlike the ALPM hook: that
+/// hook fires on every pacman transaction and must never brick unrelated
+/// installs, while `PreBuildCommand` only fires on the AUR build being
+/// gated, so the primary gate fails closed.
+pub fn hook_exit_code(code: i32) -> i32 {
+    if code != 1 {
+        return code;
+    }
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "==> aurscan: advisory findings above do not abort the build; \
+             run `aurscan ack` to acknowledge them"
+        );
+        return 0;
+    }
+    eprint!("==> aurscan: advisory findings above. Proceed with this build? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let proceed = std::io::stdin().read_line(&mut line).is_ok()
+        && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if proceed {
+        0
+    } else {
+        eprintln!("==> aurscan: build aborted at advisory findings");
+        1
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateOutcome {
     Proceed,
@@ -141,6 +185,22 @@ mod tests {
         let reports = [report("pkg", Verdict::Clean)];
         let outcome = decide(&reports, &[], false, false);
         assert_eq!(outcome, GateOutcome::Proceed);
+    }
+
+    #[test]
+    fn hook_exit_code_maps_advisory_to_success_without_a_tty() {
+        // Regression: `paru -Syyu` died at tilt-bin because one Medium
+        // advisory exited 1 and paru aborts PreBuildCommand on any non-zero.
+        // The test harness has no tty, which is exactly the unattended case:
+        // note and proceed.
+        assert_eq!(hook_exit_code(1), 0);
+    }
+
+    #[test]
+    fn hook_exit_code_passes_everything_else_through() {
+        assert_eq!(hook_exit_code(0), 0);
+        assert_eq!(hook_exit_code(2), 2, "Block must still abort the build");
+        assert_eq!(hook_exit_code(3), 3, "scan errors fail closed in this gate");
     }
 
     #[test]

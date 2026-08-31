@@ -35,7 +35,7 @@ The `--hook` flag enables two behaviors:
 1. Stage 1: scan the PKGBUILD + .install scripts in the current directory
 2. Stage 2: run `makepkg --verifysource` (fetches sources, validates checksums, but executes no build code) and scan the fetched sources
 
-If findings Block, `aurscan` exits non-zero and paru aborts the build. If findings are Advisory, the hook prints them and **allows the build to continue** — it does not prompt, and does not block. See "Advisory findings in hook mode" below.
+If findings Block, `aurscan` exits non-zero and paru aborts the build. If findings are Advisory and stdin is a terminal, the hook asks **Proceed with this build? [y/N]** on stderr — `y` continues, anything else aborts that build. Without a terminal (scripted updates, CI) it prints the findings and continues. See "Advisory findings in hook mode" below.
 
 ### paru.conf setup
 
@@ -81,9 +81,11 @@ This is not a guarantee (a compromised git repo can forge commits), but it catch
 | TTY is inherited | **Partly, and not usefully.** Under a real PTY the hook sees stdin as a TTY but **stdout is not** — paru captures it. |
 
 **Advisory findings in hook mode:**
-The hook never prompts. `gate.rs` gates prompting on `interactive && !hook && tty`, so hook mode is non-interactive by construction, independently of the TTY situation above. Advisory findings are printed and the build proceeds. Only Block aborts.
+An Advisory prompts **[y/N]** when stdin is a terminal. The prompt is written to stderr and the tty test is stdin-only, because of the TTY situation above: paru captures the hook's stdout but hands it the terminal on stdin, so a stdout-gated prompt would never fire. Declining aborts that build with exit 1. Without a terminal the findings print and the build proceeds — aborting unattended runs is exactly the `-Syyu`-killed-by-one-advisory failure this replaced. Only Block aborts unconditionally.
 
-To act on an Advisory finding, use `aurscan ack` to acknowledge it, or scan directly with `aurscan check <package>` outside the hook.
+An earlier gate exited 1 on every Advisory, which paru treats as failure: one Medium finding on one package (observed: `1password`, `eval` of a heredoc in `package()`) aborted a whole 27-package upgrade with the report unhelpfully headed `.:` (fixed: reports are named from the PKGBUILD's `pkgname`).
+
+To silence a reviewed Advisory permanently, use `aurscan ack` to acknowledge it, or scan directly with `aurscan check <package>` outside the hook.
 
 **Multi-package builds:**
 `paru -S pkg1 pkg2 pkg3` runs PreBuildCommand per package, but the **first** failure aborts the whole transaction — remaining packages are neither scanned nor built. Verified with `paru -S worktrunk-bin 1password-cli` failing on the first: paru exited 1 and the second package was never touched. This is fail-closed, which is the safe direction, but it is not independent per-package gating.
@@ -269,7 +271,7 @@ Neither PreBuildCommand nor the ALPM hook prompts. Two independent reasons:
 1. paru captures the hook's stdout, so it is not a TTY even when run from a terminal (stdin is; stdout is not). aurscan requires both before prompting.
 2. `gate.rs` disables prompting in hook mode outright (`interactive && !hook && tty`), so it would not prompt even with a full TTY.
 
-The practical consequence: **Block aborts the build, Advisory prints and proceeds.** There is no interactive override at the hook, and no "defaults to blocking Advisory" fallback — an earlier version of this document claimed one; it does not exist. Use `aurscan ack` to acknowledge advisories, or `aurscan install --allow` for a Block you have judged safe.
+The practical consequence: **Block aborts the build; Advisory prompts [y/N] at a terminal and proceeds unattended.** There is no interactive override for a Block at the hook. Use `aurscan ack` to acknowledge advisories, or `aurscan install --allow` for a Block you have judged safe.
 
 ### VCS sources (-git packages)
 

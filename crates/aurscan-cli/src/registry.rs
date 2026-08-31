@@ -81,10 +81,40 @@ fn build_job(path: &Path) -> Option<PackageJob> {
         vec![wrap_file(path)]
     };
     Some(PackageJob {
-        name: basename(path),
+        name: job_name(path),
         version: String::new(),
         aur_meta: None,
         targets,
+    })
+}
+
+/// A report name a human can act on. paru's `PreBuildCommand` invokes
+/// `check --hook .`, and naming that report `.` left a real 27-package
+/// upgrade aborting with no way to tell *which* package raised the advisory.
+/// Prefer the PKGBUILD's own `pkgname=`; fall back to the canonicalized
+/// directory name so `.` still resolves to something meaningful.
+fn job_name(path: &Path) -> String {
+    if path.is_dir() {
+        if let Some(name) = std::fs::read_to_string(path.join("PKGBUILD"))
+            .ok()
+            .as_deref()
+            .and_then(pkgname_from_pkgbuild)
+        {
+            return name;
+        }
+    }
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    basename(&canonical)
+}
+
+/// The literal `pkgname=` value, when it is a plain name. Split-package
+/// arrays and shell expansions are left to the caller's fallback rather
+/// than mis-parsed.
+fn pkgname_from_pkgbuild(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("pkgname=")?;
+        let val = rest.trim().trim_matches(['"', '\'']);
+        (!val.is_empty() && !val.contains(['$', '(', ')', ' ', '\t'])).then(|| val.to_string())
     })
 }
 
@@ -127,6 +157,36 @@ fn now_epoch() -> i64 {
 mod tests {
     use super::*;
     use aurscan_core::Verdict;
+
+    #[test]
+    fn job_name_comes_from_pkgbuild_not_the_path_argument() {
+        // Regression: paru runs `check --hook .`, and the report was headed
+        // `.: ADVISORY` -- during a 27-package upgrade there was no way to
+        // tell which package fired.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PKGBUILD"), b"pkgname=onepass\n").unwrap();
+        assert_eq!(job_name(dir.path()), "onepass");
+    }
+
+    #[test]
+    fn job_name_falls_back_to_the_canonical_dir_for_split_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PKGBUILD"), b"pkgname=('a' 'b')\n").unwrap();
+        let got = job_name(dir.path());
+        assert_ne!(got, ".", "must never surface the raw path argument");
+        assert!(!got.is_empty());
+    }
+
+    #[test]
+    fn pkgname_parsing_rejects_expansions() {
+        assert_eq!(pkgname_from_pkgbuild("pkgname=foo\n"), Some("foo".into()));
+        assert_eq!(
+            pkgname_from_pkgbuild("pkgname=\"foo\"\n"),
+            Some("foo".into())
+        );
+        assert_eq!(pkgname_from_pkgbuild("pkgname=$_base-bin\n"), None);
+        assert_eq!(pkgname_from_pkgbuild("pkgname=('a' 'b')\n"), None);
+    }
 
     #[test]
     fn planted_atomic_lockfile_token_yields_block_exit_2() {

@@ -38,9 +38,17 @@ fn main() {
                 0
             } else {
                 let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-                flow::run_check_names(&refs, &cfg, hook, cli.json, cli.no_color, cli.verbose)
+                flow::run_check_names(&refs, &cfg, cli.json, cli.no_color, cli.verbose)
             };
-            path_code.max(name_code)
+            // The hook mapping wraps *both* branches: paru's PreBuildCommand
+            // passes a path (`check --hook .`), which previously bypassed
+            // the hook flag entirely.
+            let code = path_code.max(name_code);
+            if hook {
+                gate::hook_exit_code(code)
+            } else {
+                code
+            }
         }
         Cmd::Install { packages, allow } => {
             let refs: Vec<&str> = packages.iter().map(String::as_str).collect();

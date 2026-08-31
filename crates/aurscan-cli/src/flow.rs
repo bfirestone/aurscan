@@ -74,13 +74,10 @@ fn fetch_and_scan(info: &AurInfo, cfg: &Config) -> anyhow::Result<Vec<PackageRep
 pub fn run_check_names(
     names: &[&str],
     cfg: &Config,
-    hook: bool,
     json: bool,
     no_color: bool,
     verbose: bool,
 ) -> i32 {
-    let _ = hook; // reserved: `check` never gates/prompts, only reports.
-
     let infos = match aur_rpc::resolve_aur_deps(names) {
         Ok(i) => i,
         Err(e) => {
