@@ -36,7 +36,7 @@ options=('!lto')
 # PKGBUILDs across several distros. An uploaded asset is a fixed byte string.
 # Rebuild it with: git archive --format=tar.gz --prefix=$pkgname-$pkgver/ v$pkgver
 source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('6fec06e5769218fff50c9dafcda548780254a1df1416281d067f01b01d42f7b2')
+sha256sums=('6c921d761527ac040ec8517cbdea1d9f75736b3b684645749767188d823ee8e6')
 
 build() {
 	cd "$pkgname-$pkgver"
