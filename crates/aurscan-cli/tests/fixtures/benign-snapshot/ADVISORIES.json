@@ -6,6 +6,14 @@
         "source_provenance/info": 1
       },
       "findings": 1,
+      "package": "antigravity",
+      "verdict": "clean"
+    },
+    {
+      "by_rule": {
+        "source_provenance/info": 1
+      },
+      "findings": 1,
       "package": "antigravity-cli",
       "verdict": "clean"
     },
@@ -15,6 +23,14 @@
       },
       "findings": 1,
       "package": "antigravity-ide",
+      "verdict": "clean"
+    },
+    {
+      "by_rule": {
+        "source_provenance/info": 1
+      },
+      "findings": 1,
+      "package": "chatgpt-desktop",
       "verdict": "clean"
     },
     {
@@ -75,7 +91,7 @@
     }
   ],
   "totals_by_rule": {
-    "source_provenance/info": 9,
+    "source_provenance/info": 11,
     "source_provenance/medium": 4
   }
 }
