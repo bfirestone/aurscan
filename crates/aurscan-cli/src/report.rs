@@ -33,12 +33,40 @@ pub fn render_text(
             let marker = severity_marker(f.severity, color);
             let _ = writeln!(out, "  {marker} {}", f.reason);
             let _ = writeln!(out, "    \u{21b3} {}", f.evidence.location);
+            for line in excerpt_lines(f) {
+                let _ = writeln!(out, "      \u{2502} {line}");
+            }
         }
         if acknowledged > 0 {
             let _ = writeln!(out, "  ({acknowledged} acknowledged)");
         }
     }
     out
+}
+
+/// How many excerpt lines a finding may print before elision.
+const MAX_EXCERPT_LINES: usize = 4;
+
+/// The evidence excerpt as displayable lines, or nothing when it would not
+/// add information. A user deciding at the paru y/N prompt needs to *see*
+/// the flagged code, not open PKGBUILD:39 mid-transaction — but detectors
+/// like `archive_layout` put the member path in both the reason and the
+/// excerpt, and repeating it is noise.
+fn excerpt_lines(f: &Finding) -> Vec<String> {
+    let excerpt = f.evidence.excerpt.trim();
+    if excerpt.is_empty() || f.reason.contains(excerpt) {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = excerpt
+        .lines()
+        .map(|l| l.trim_end().to_string())
+        .take(MAX_EXCERPT_LINES + 1)
+        .collect();
+    if lines.len() > MAX_EXCERPT_LINES {
+        lines.truncate(MAX_EXCERPT_LINES);
+        lines.push("\u{2026}".to_string());
+    }
+    lines
 }
 
 /// Structured view: per-package verdicts + findings plus a rollup summary.
@@ -144,6 +172,57 @@ mod tests {
             findings,
             features: vec![],
         }
+    }
+
+    #[test]
+    fn text_report_shows_the_flagged_code_under_the_location() {
+        // Regression: the paru y/N prompt showed only "PKGBUILD:39" and
+        // asked the user to judge safety of code they could not see.
+        let f = finding(
+            Severity::Medium,
+            "eval of dynamic command substitution in package()",
+            "eval \"cat <<EOF\n$(envsubst < env.conf)\nEOF\"",
+        );
+        let out = render_text(
+            &[report("1password", Verdict::Advisory(vec![]), vec![f])],
+            &AckStore::from_keys([]),
+            false,
+            false,
+        );
+        assert!(out.contains("\u{2502} eval \"cat <<EOF"), "got:\n{out}");
+        assert!(
+            out.contains("\u{2502} $(envsubst < env.conf)"),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn excerpt_is_skipped_when_the_reason_already_contains_it() {
+        // archive_layout puts the member path in both fields.
+        let f = finding(
+            Severity::High,
+            "setuid binary in package: usr/bin/evil",
+            "usr/bin/evil",
+        );
+        let out = render_text(
+            &[report("p", Verdict::Block(vec![]), vec![f])],
+            &AckStore::from_keys([]),
+            false,
+            false,
+        );
+        assert!(!out.contains('\u{2502}'), "got:\n{out}");
+    }
+
+    #[test]
+    fn long_excerpts_are_line_capped_with_an_ellipsis() {
+        let body = (1..=8)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let f = finding(Severity::Medium, "large opaque blob", &body);
+        let lines = excerpt_lines(&f);
+        assert_eq!(lines.len(), MAX_EXCERPT_LINES + 1);
+        assert_eq!(lines.last().unwrap(), "\u{2026}");
     }
 
     #[test]
