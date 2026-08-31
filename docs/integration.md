@@ -98,10 +98,22 @@ The ALPM pacman hook at `/usr/share/libalpm/hooks/aurscan.hook` runs `aurscan sc
 
 The hook:
 - Runs before pacman modifies the filesystem
-- Reads the packages being installed from stdin (ALPM-provided format)
-- Filters to foreign (AUR) packages
-- Scans built binaries for payload hashes, setuid bits, suspicious archive layout
-- Exits non-zero if findings Block, aborting the transaction
+- Reads the target package *names* from stdin (`Type = Package` hooks receive
+  names, never archive paths, regardless of how the install was invoked)
+- Resolves each name to a built `.pkg.tar.zst`: pacman's download cache
+  (`/var/cache/pacman/pkg/`, repo packages), then the invoking user's paru
+  clone cache (`~/.cache/paru/clone/`, via `SUDO_USER` — AUR builds installed
+  with `pacman -U` never enter pacman's cache), then `PKGDEST` from
+  makepkg.conf. Several cached versions resolve to the newest build.
+- Warns visibly when a *foreign* package resolves nowhere (it was not
+  scanned); an unresolved repo package is unremarkable, pacman verified its
+  signature
+- Scans resolved archives for payload hashes, setuid bits, suspicious archive
+  layout
+- Exits non-zero only on a Block verdict, aborting the transaction. Advisory
+  findings print and the install proceeds (same contract as the paru gate);
+  scan errors also proceed, so an aurscan defect cannot brick unrelated
+  transactions
 
 This is the stage 3 gate: it catches compromises that occurred during build but after PKGBUILD execution (e.g., build environment compromise, binary hijacking).
 
@@ -168,8 +180,8 @@ User: paru -S firefox aspell-en
 │  │  ├─ aurscan scan-artifact --hook (reads from stdin)
 │  │  ├─ stage 3: scan archive members (payload_hashes, elf_inspect, archive_layout, etc.)
 │  │  ├─ firefox: clean → allow
-│  │  ├─ aspell-en: advisory → block/prompt (depends on config)
-│  │  ├─ hook exits: if any block → abort transaction, otherwise allow
+│  │  ├─ aspell-en: advisory → print findings, allow
+│  │  ├─ hook exits: if any Block → abort transaction, otherwise allow
 │  │
 │  ├─ [pacman installs packages]
 ```
