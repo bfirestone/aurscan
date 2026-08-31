@@ -3,42 +3,10 @@
   "packages_with_findings": [
     {
       "by_rule": {
-        "source_provenance/info": 2
+        "source_provenance/info": 1
       },
-      "findings": 2,
+      "findings": 1,
       "package": "antigravity-cli",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 2
-      },
-      "findings": 2,
-      "package": "antigravity-ide",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 3
-      },
-      "findings": 3,
-      "package": "claude-code",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 147
-      },
-      "findings": 147,
-      "package": "electron37",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 4
-      },
-      "findings": 4,
-      "package": "exodus-bin",
       "verdict": "clean"
     },
     {
@@ -46,7 +14,31 @@
         "source_provenance/info": 1
       },
       "findings": 1,
-      "package": "google-chrome",
+      "package": "antigravity-ide",
+      "verdict": "clean"
+    },
+    {
+      "by_rule": {
+        "source_provenance/info": 2
+      },
+      "findings": 2,
+      "package": "claude-code",
+      "verdict": "clean"
+    },
+    {
+      "by_rule": {
+        "source_provenance/info": 1
+      },
+      "findings": 1,
+      "package": "electron37",
+      "verdict": "clean"
+    },
+    {
+      "by_rule": {
+        "source_provenance/info": 1
+      },
+      "findings": 1,
+      "package": "exodus-bin",
       "verdict": "clean"
     },
     {
@@ -70,69 +62,20 @@
         "source_provenance/info": 1
       },
       "findings": 1,
-      "package": "jetbrains-toolbox",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 1
-      },
-      "findings": 1,
-      "package": "lib32-gstreamer",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 1
-      },
-      "findings": 1,
-      "package": "libsoup",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 1
-      },
-      "findings": 1,
-      "package": "lmstudio-bin",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 1
-      },
-      "findings": 1,
       "package": "monado",
       "verdict": "clean"
     },
     {
       "by_rule": {
-        "source_provenance/info": 1
-      },
-      "findings": 1,
-      "package": "nvidia-580xx-utils",
-      "verdict": "clean"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 4,
         "source_provenance/medium": 4
       },
-      "findings": 8,
+      "findings": 4,
       "package": "spotify",
       "verdict": "advisory"
-    },
-    {
-      "by_rule": {
-        "source_provenance/info": 3
-      },
-      "findings": 3,
-      "package": "visual-studio-code-bin",
-      "verdict": "clean"
     }
   ],
   "totals_by_rule": {
-    "source_provenance/info": 174,
+    "source_provenance/info": 9,
     "source_provenance/medium": 4
   }
 }

@@ -260,6 +260,7 @@ impl SourceProvenanceDetector {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_source(
         &self,
         package: &str,
@@ -267,6 +268,7 @@ impl SourceProvenanceDetector {
         line_no: usize,
         raw_value: &str,
         url_host: Option<&str>,
+        seen_mismatch_domains: &mut std::collections::HashSet<String>,
         findings: &mut Vec<Finding>,
     ) {
         let url = source_url(raw_value);
@@ -326,7 +328,22 @@ impl SourceProvenanceDetector {
         }
 
         if let Some(url_host) = url_host {
-            if host != url_host && !KNOWN_HOSTS.contains(&host.as_str()) {
+            // Compare registrable domains, not hosts: www.spotify.com vs
+            // repository.spotify.com is the same organization, and the
+            // host-exact version of this rule was 97.8% of all findings
+            // across the real top-50 corpus (174 of 178) -- almost entirely
+            // homepage-vs-download-host splits within one domain or plainly
+            // legitimate CDNs. Cross-domain sources stay Info: real signal
+            // for verbose/JSON/ML consumers, and Info never gates.
+            // One finding per distinct source domain, not per URL: electron37
+            // fetches ~147 sources from chromium.googlesource.com and each
+            // one repeating the same fact drowned every other signal in the
+            // report and the ML corpus.
+            let source_domain = registrable_domain(&host);
+            if source_domain != registrable_domain(url_host)
+                && !KNOWN_HOSTS.contains(&host.as_str())
+                && seen_mismatch_domains.insert(source_domain)
+            {
                 findings.push(self.finding(
                     package,
                     path,
@@ -337,6 +354,33 @@ impl SourceProvenanceDetector {
                 ));
             }
         }
+    }
+}
+
+/// Country-code second-level suffixes under which the registrable domain is
+/// three labels, not two. A short common-cases table rather than the full
+/// public-suffix list: this feeds an Info-severity comparison, and the
+/// failure mode of a miss is one extra Info finding, not a wrong verdict.
+const TWO_LEVEL_SUFFIXES: &[&str] = &[
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "or.jp", "ne.jp",
+    "com.br", "com.cn", "com.tw", "co.nz", "co.in", "co.kr", "com.mx", "com.ar",
+];
+
+/// The registrable domain of `host`: its last two labels, or three when the
+/// two-label tail is a known country-code second-level suffix.
+fn registrable_domain(host: &str) -> String {
+    let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
+    let take = if labels.len() >= 3
+        && TWO_LEVEL_SUFFIXES.contains(&labels[labels.len() - 2..].join(".").as_str())
+    {
+        3
+    } else {
+        2
+    };
+    if labels.len() <= take {
+        host.to_string()
+    } else {
+        labels[labels.len() - take..].join(".")
     }
 }
 
@@ -376,6 +420,7 @@ impl Detector for SourceProvenanceDetector {
             .map(|(_, host)| host);
 
         let mut findings = Vec::new();
+        let mut seen_mismatch_domains = std::collections::HashSet::new();
         for kv in entries
             .iter()
             .filter(|kv| kv.key == "source" || kv.key.starts_with("source_"))
@@ -386,6 +431,7 @@ impl Detector for SourceProvenanceDetector {
                 kv.line_no,
                 &kv.value,
                 url_host.as_deref(),
+                &mut seen_mismatch_domains,
                 &mut findings,
             );
         }
@@ -406,6 +452,7 @@ const _: fn() = || {
 
 #[cfg(test)]
 mod tests {
+    use super::registrable_domain;
     use aurscan_core::{Detector, DetectorResult, ScanContext, ScanTarget, ScriptKind, Severity};
     use std::io::Write;
 
@@ -458,6 +505,60 @@ mod tests {
             .findings
             .iter()
             .any(|f| f.severity >= Severity::High && f.reason.contains("typosquat")));
+    }
+
+    #[test]
+    fn same_registrable_domain_is_not_a_mismatch() {
+        // Regression: www.spotify.com vs repository.spotify.com is one
+        // organization; the host-exact comparison flagged it (and every
+        // homepage-vs-download-host split like it) on nearly every real
+        // package.
+        let r = scan_srcinfo(
+            "pkgbase = x\n\turl = https://www.spotify.com\n\tsource = https://repository.spotify.com/pool/s/spotify.deb\n",
+        );
+        assert!(
+            !r.findings.iter().any(|f| f.reason.contains("mismatch")),
+            "got {:?}",
+            r.findings
+        );
+    }
+
+    #[test]
+    fn registrable_domain_handles_cc_second_level_suffixes() {
+        assert_eq!(registrable_domain("www.spotify.com"), "spotify.com");
+        assert_eq!(registrable_domain("repository.spotify.com"), "spotify.com");
+        assert_eq!(
+            registrable_domain("downloads.example.co.uk"),
+            "example.co.uk"
+        );
+        // Two unrelated .co.uk sites must NOT collapse into "co.uk".
+        assert_ne!(
+            registrable_domain("foo.co.uk"),
+            registrable_domain("bar.co.uk")
+        );
+        assert_eq!(registrable_domain("github.com"), "github.com");
+    }
+
+    #[test]
+    fn mismatch_fires_once_per_source_domain_not_per_url() {
+        // Regression: electron37 fetches ~147 sources from
+        // chromium.googlesource.com and each URL repeated the same fact.
+        let r = scan_srcinfo(
+            "pkgbase = x\n\turl = https://example.org\n\
+             \tsource = https://cdn.example.net/a.tar.gz\n\
+             \tsource = https://cdn.example.net/b.tar.gz\n\
+             \tsource = https://other.example.io/c.tar.gz\n",
+        );
+        let mismatches = r
+            .findings
+            .iter()
+            .filter(|f| f.reason.contains("mismatch"))
+            .count();
+        assert_eq!(
+            mismatches, 2,
+            "one per distinct domain, got {:?}",
+            r.findings
+        );
     }
 
     #[test]
