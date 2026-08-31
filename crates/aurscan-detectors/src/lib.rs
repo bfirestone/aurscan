@@ -19,7 +19,11 @@
 ///   false-positive Block on packaged Electron apps (brave-bin, 1password,
 ///   slack-desktop, ...). Any other setuid file, and anything setuid under
 ///   `usr/bin`/`usr/sbin`, still Blocks.
-pub const DETECTOR_EPOCH: u32 = 4;
+/// - 5: `pkgbuild_static` no longer bash-parses non-shell clone files
+///   (.desktop/.json/... produced garbage "opaque blob" findings), and
+///   `elf_inspect` demotes the fork+connect / mmap+mprotect+dlopen import
+///   combination to Info (it matches every networked or JIT-ing program).
+pub const DETECTOR_EPOCH: u32 = 5;
 
 pub mod archive_layout;
 pub mod aur_metadata;

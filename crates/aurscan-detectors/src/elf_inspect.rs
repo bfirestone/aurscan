@@ -245,10 +245,17 @@ impl Detector for ElfInspectDetector {
                 ));
             }
             if combo_hit {
+                // Info, not Medium: fork+connect is every networked program
+                // and mmap+mprotect+dlopen is every JIT, so on real artifacts
+                // this was the single noisiest advisory wall (four Mediums on
+                // one browser install). All hits come from this one detector,
+                // so they never fed the 3-distinct-detector escalation
+                // either; the combo still rides in reports, JSON, and the ML
+                // feature vector (n_suspicious_imports).
                 findings.push(
                     self.finding(
                         &ctx.package,
-                        Severity::Medium,
+                        Severity::Info,
                         "suspicious import combination (fork+connect or mmap+mprotect+dlopen)"
                             .to_string(),
                         &location,

