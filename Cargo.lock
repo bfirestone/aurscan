@@ -87,7 +87,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "aurscan"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "aurscan-core",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "aurscan-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "aurscan-detectors"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aho-corasick",
  "anyhow",
