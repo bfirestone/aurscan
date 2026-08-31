@@ -107,9 +107,9 @@ This is the stage 3 gate: it catches compromises that occurred during build but 
 
 ### Hook location
 
-`aurscan setup` (or the AUR package) installs the hook to `/usr/share/libalpm/hooks/aurscan.hook`. This is the **system-owned** hook directory; pacman checks it for all transactions (users and admins).
+The AUR package installs the hook to `/usr/share/libalpm/hooks/aurscan.hook`, the **package-owned** hook directory. pacman reads it for all transactions and updates the file on package upgrade.
 
-`aurscan setup` also creates a user-owned hook at `~/.config/pacman/hooks/aurscan.hook` (optional; the system hook is primary).
+For cargo-install users (no package to deliver the file), `aurscan setup` installs the same hook to `/etc/pacman.d/hooks/aurscan.hook`, the **admin-owned** hook directory. When run without root it prints the command to do so. Only one of the two locations should hold the hook: pacman reads both, and a copy in each would run the scan twice per transaction. `setup` therefore skips the `/etc` install when the package-owned hook exists.
 
 ### Hook file
 

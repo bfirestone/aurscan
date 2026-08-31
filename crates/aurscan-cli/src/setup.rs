@@ -14,14 +14,21 @@ const PARU_SNIPPET: &str = "PreBuildCommand = /usr/bin/aurscan check --hook .";
 /// no error, just an ungated system. Verified against paru v2.1.0.
 const PARU_SECTION: &str = "[bin]";
 const HOOK_TEXT: &str = include_str!("../../../data/aurscan.hook");
+/// Where `setup` installs the hook for cargo-install users: the admin-owned
+/// hook directory. The AUR package instead ships it in the package-owned
+/// directory below; ALPM reads both.
 const HOOK_DEST: &str = "/etc/pacman.d/hooks/aurscan.hook";
+/// Where the AUR package installs the hook (see PKGBUILD `package()`). When
+/// this exists the hook is already live and `setup` must not add a second
+/// copy under /etc -- ALPM would run both, scanning every transaction twice.
+const PACKAGED_HOOK: &str = "/usr/share/libalpm/hooks/aurscan.hook";
 
 /// Print/install the paru.conf snippet, then the ALPM hook. `assume_yes`
 /// skips the confirm, so `aurscan setup --yes` is a one-liner suitable for
 /// the message a package `post_install` prints.
 pub fn run(assume_yes: bool) -> anyhow::Result<()> {
     setup_paru_conf(&paru_conf_path()?, assume_yes)?;
-    install_hook(Path::new(HOOK_DEST))
+    install_hook(Path::new(HOOK_DEST), Path::new(PACKAGED_HOOK))
 }
 
 /// `aurscan setup --check`: report whether the paru gate is actually live,
@@ -111,10 +118,23 @@ fn setup_paru_conf(path: &Path, assume_yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Install the compiled-in ALPM hook to `dest`. Needs root; when not root,
-/// print the exact `sudo install -Dm644` command instead of failing. Skips
-/// (idempotently) when `dest` already holds the current hook text.
-fn install_hook(dest: &Path) -> anyhow::Result<()> {
+/// Install the compiled-in ALPM hook to `dest`, unless the package already
+/// ships one at `packaged`. Needs root; when not root, print a command that
+/// writes the embedded hook text instead of failing. Skips (idempotently)
+/// when `dest` already holds the current hook text.
+///
+/// This path exists for cargo-install users. A package install already
+/// delivers the hook at `packaged`, and pacman owns that file -- it is
+/// updated on upgrade and must not be duplicated under /etc.
+fn install_hook(dest: &Path, packaged: &Path) -> anyhow::Result<()> {
+    if packaged.exists() {
+        println!(
+            "alpm hook: installed by the package at {}, nothing to do",
+            packaged.display()
+        );
+        return Ok(());
+    }
+
     if std::fs::read_to_string(dest)
         .map(|c| c == HOOK_TEXT)
         .unwrap_or(false)
@@ -124,10 +144,11 @@ fn install_hook(dest: &Path) -> anyhow::Result<()> {
     }
 
     if !is_root() {
+        // There is no hook file on disk to copy in a cargo install, so the
+        // suggested command materializes the compiled-in text itself.
         println!(
-            "alpm hook: not root; install it with:\n  sudo install -Dm644 {} {}",
-            hook_source_path().display(),
-            dest.display()
+            "alpm hook: not root; install it with:\n{}",
+            manual_install_command(dest)
         );
         return Ok(());
     }
@@ -140,10 +161,16 @@ fn install_hook(dest: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The hook file's location in the installed package tree, for the printed
-/// `sudo install` command (the compiled-in text is embedded from here).
-fn hook_source_path() -> PathBuf {
-    PathBuf::from("/usr/share/aurscan/aurscan.hook")
+/// A copy-pasteable command that writes the embedded hook text to `dest`.
+/// The mkdir matters: /etc/pacman.d/hooks/ does not exist on a stock system,
+/// and `tee` will not create it.
+fn manual_install_command(dest: &Path) -> String {
+    let dir = dest.parent().unwrap_or(Path::new("/")).display();
+    format!(
+        "  sudo mkdir -p {dir}\n  sudo tee {} >/dev/null <<'EOF'\n{}EOF",
+        dest.display(),
+        HOOK_TEXT
+    )
 }
 
 fn confirm(prompt: &str) -> bool {
@@ -259,15 +286,55 @@ mod tests {
     fn install_hook_skips_when_already_installed_with_current_text() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("aurscan.hook");
+        let packaged = dir.path().join("packaged/aurscan.hook");
         std::fs::write(&dest, HOOK_TEXT).unwrap();
         let before = std::fs::metadata(&dest).unwrap().modified().unwrap();
 
-        install_hook(&dest).unwrap();
+        install_hook(&dest, &packaged).unwrap();
 
         let after = std::fs::metadata(&dest).unwrap().modified().unwrap();
         assert_eq!(
             before, after,
             "an up-to-date hook file must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn install_hook_defers_to_the_package_owned_hook() {
+        // Regression: on a package-installed system, setup told the user to
+        // sudo-install a copy under /etc even though the hook shipped by the
+        // package was already live -- and pointed the copy command at
+        // /usr/share/aurscan/aurscan.hook, a path nothing has ever shipped.
+        // A second copy would make ALPM run the scan twice per transaction.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("etc/aurscan.hook");
+        let packaged = dir.path().join("libalpm/aurscan.hook");
+        std::fs::create_dir_all(packaged.parent().unwrap()).unwrap();
+        std::fs::write(&packaged, HOOK_TEXT).unwrap();
+
+        install_hook(&dest, &packaged).unwrap();
+
+        assert!(
+            !dest.exists(),
+            "must not write a duplicate hook when the package already ships one"
+        );
+    }
+
+    #[test]
+    fn manual_install_command_is_self_contained() {
+        // Cargo-install users have no hook file on disk to copy, so the
+        // printed command must carry the hook text itself and create the
+        // hooks directory (absent on a stock system).
+        let cmd = manual_install_command(Path::new("/etc/pacman.d/hooks/aurscan.hook"));
+        assert!(cmd.contains("sudo mkdir -p /etc/pacman.d/hooks"), "{cmd}");
+        assert!(
+            cmd.contains("sudo tee /etc/pacman.d/hooks/aurscan.hook"),
+            "{cmd}"
+        );
+        assert!(cmd.contains(HOOK_TEXT), "{cmd}");
+        assert!(
+            !cmd.contains("/usr/share/aurscan/"),
+            "the never-shipped path must not reappear: {cmd}"
         );
     }
 }

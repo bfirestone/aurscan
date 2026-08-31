@@ -5,3 +5,7 @@ __pycache__/
 # Release tarballs are generated for upload, not stored:
 #   git archive --format=tar.gz --prefix=$pkgname-$pkgver/ v$pkgver
 aurscan-*.tar.gz
+
+# makepkg build debris (running makepkg -si in the repo root):
+/pkg/
+/src/
