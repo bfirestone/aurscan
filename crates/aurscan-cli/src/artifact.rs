@@ -205,6 +205,38 @@ mod tests {
     }
 
     #[test]
+    fn scan_files_electron_shaped_archive_is_not_blocked() {
+        // Regression: the standard Electron layout — the app in its own
+        // directory with Chromium's setuid sandbox helper — was an
+        // unconditional Block. It is the shape of most popular AUR -bin
+        // desktop apps (zennotes-bin, brave-bin, 1password, slack-desktop),
+        // observed against the real built artifacts in a paru cache.
+        // Advisory (exit 1) is acceptable; Block (exit 2) is the bug.
+        let (_dir, path) = make_pkg(
+            &[
+                (".PKGINFO", 0o644, b"pkgname=zennotes-bin\n" as &[u8]),
+                ("opt/zennotes-bin/zennotes", 0o755, b"\x7fELFxx" as &[u8]),
+                (
+                    "opt/zennotes-bin/chrome-sandbox",
+                    0o4755,
+                    b"\x7fELFxx" as &[u8],
+                ),
+                (
+                    "usr/share/applications/zennotes.desktop",
+                    0o644,
+                    b"[Desktop Entry]\n" as &[u8],
+                ),
+            ],
+            "zennotes-bin-2.40.0-1-x86_64.pkg.tar.zst",
+        );
+        let code = scan_files(&[path], &test_cfg(), false, true, false);
+        assert_ne!(
+            code, 2,
+            "the Electron chrome-sandbox shape must not Block popular apps"
+        );
+    }
+
+    #[test]
     fn scan_files_clean_archive_yields_exit_0() {
         let (_dir, path) = make_pkg(
             &[

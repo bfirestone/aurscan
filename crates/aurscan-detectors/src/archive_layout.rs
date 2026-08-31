@@ -76,13 +76,31 @@ impl ArchiveLayoutDetector {
             let location = format!("{}!{}", archive.display(), member);
 
             if mode & 0o4000 != 0 {
-                findings.push(self.finding(
-                    package,
-                    Severity::High,
-                    format!("setuid binary in package: {member}"),
-                    &location,
-                    &member,
-                ));
+                if is_chrome_sandbox_shape(&member, &basename) {
+                    // Chromium's SUID sandbox helper: shipped 4755 by design
+                    // and present in virtually every packaged Electron app
+                    // (verified against real AUR artifacts: brave-bin,
+                    // 1password, slack-desktop, claude-desktop-bin, ...). At
+                    // High this blocked them all. Medium keeps it visible,
+                    // ack-able, and counting toward the escalation rule, so a
+                    // payload merely *named* chrome-sandbox still Blocks once
+                    // two more detectors fire.
+                    findings.push(self.finding(
+                        package,
+                        Severity::Medium,
+                        format!("setuid Chromium sandbox helper: {member}"),
+                        &location,
+                        &member,
+                    ));
+                } else {
+                    findings.push(self.finding(
+                        package,
+                        Severity::High,
+                        format!("setuid binary in package: {member}"),
+                        &location,
+                        &member,
+                    ));
+                }
             }
             if mode & 0o2000 != 0 {
                 findings.push(self.finding(
@@ -152,6 +170,17 @@ impl ArchiveLayoutDetector {
             },
         }
     }
+}
+
+/// The one setuid layout that legitimate packages ship at scale: Chromium's
+/// sandbox helper, always named `chrome-sandbox` and always inside the app's
+/// own directory (`opt/<app>/`, `usr/lib/<app>/`). A setuid file under
+/// `usr/bin/` or `usr/sbin/` is on $PATH and is *not* that shape, whatever
+/// its name, so it keeps the Block-severity treatment.
+fn is_chrome_sandbox_shape(member: &str, basename: &str) -> bool {
+    basename == "chrome-sandbox"
+        && !member.starts_with("usr/bin/")
+        && !member.starts_with("usr/sbin/")
 }
 
 impl Default for ArchiveLayoutDetector {
@@ -236,6 +265,49 @@ mod tests {
         let (_d, p) = make_pkg(&[
             (".PKGINFO", 0o644, b"pkgname=x\n"),
             ("usr/bin/tool", 0o4755, b"\x7fELFxx"),
+        ]);
+        let r = scan_pkginfo(&p);
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.severity >= Severity::High && f.reason.contains("setuid")));
+    }
+
+    #[test]
+    fn setuid_chrome_sandbox_in_app_dir_is_medium_not_high() {
+        // Regression: every packaged Electron app ships Chromium's SUID
+        // sandbox helper (brave-bin, 1password, slack-desktop, ...), and at
+        // High severity each one was an unconditional Block.
+        for member in [
+            "opt/zennotes-bin/chrome-sandbox",
+            "usr/lib/slack/chrome-sandbox",
+        ] {
+            let (_d, p) = make_pkg(&[
+                (".PKGINFO", 0o644, b"pkgname=x\n".as_slice()),
+                (member, 0o4755, b"\x7fELFxx"),
+            ]);
+            let r = scan_pkginfo(&p);
+            let setuid: Vec<_> = r
+                .findings
+                .iter()
+                .filter(|f| f.reason.contains("setuid"))
+                .collect();
+            assert_eq!(setuid.len(), 1, "{member}: {setuid:?}");
+            assert_eq!(
+                setuid[0].severity,
+                Severity::Medium,
+                "{member} must be Advisory-level, not Block-level"
+            );
+        }
+    }
+
+    #[test]
+    fn setuid_chrome_sandbox_on_path_is_still_high() {
+        // The demotion is a shape, not a name allowlist: a setuid file on
+        // $PATH keeps Block severity no matter what it is called.
+        let (_d, p) = make_pkg(&[
+            (".PKGINFO", 0o644, b"pkgname=x\n".as_slice()),
+            ("usr/bin/chrome-sandbox", 0o4755, b"\x7fELFxx"),
         ]);
         let r = scan_pkginfo(&p);
         assert!(r

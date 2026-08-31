@@ -14,7 +14,12 @@
 ///   (`/dev/null`, `/dev/stderr`, ...) as system-path writes, clearing a
 ///   false-positive Block on `paru`, `shelly-bin` and `xrizer`. Destructive
 ///   nodes (`/dev/sda`, `/dev/mem`) still Block.
-pub const DETECTOR_EPOCH: u32 = 3;
+/// - 4: `archive_layout` demotes Chromium's setuid `chrome-sandbox` helper
+///   (inside the app's own directory) from High to Medium, clearing a
+///   false-positive Block on packaged Electron apps (brave-bin, 1password,
+///   slack-desktop, ...). Any other setuid file, and anything setuid under
+///   `usr/bin`/`usr/sbin`, still Blocks.
+pub const DETECTOR_EPOCH: u32 = 4;
 
 pub mod archive_layout;
 pub mod aur_metadata;
