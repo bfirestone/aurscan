@@ -1,0 +1,6 @@
+# makepkg working state: the bare clone, build tree, package tree, artifacts.
+aurscan/
+src/
+pkg/
+*.pkg.tar.zst
+*.log
