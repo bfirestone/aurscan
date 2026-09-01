@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "severity",
+          "file",
+          "start_line",
+          "end_line",
+          "reason"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "obfuscated_execution",
+              "download_execute",
+              "credential_access",
+              "persistence_privilege",
+              "data_exfiltration",
+              "build_install_boundary",
+              "supply_chain_anomaly",
+              "other_semantic"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["info", "medium", "high", "critical"]
+          },
+          "file": { "type": "string" },
+          "start_line": { "type": "integer", "minimum": 1 },
+          "end_line": { "type": "integer", "minimum": 1 },
+          "reason": { "type": "string" }
+        }
+      }
+    }
+  }
+}
