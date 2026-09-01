@@ -48,7 +48,18 @@ pub(crate) struct DeepCollection {
 struct PackageGroup {
     info: AurInfo,
     requested_packages: BTreeSet<String>,
-    local_checkout: Option<PathBuf>,
+    local_checkout: Option<LocalCheckout>,
+}
+
+struct LocalCheckout {
+    root: fetch::SecureRoot,
+    target: PathBuf,
+}
+
+impl LocalCheckout {
+    fn proc_path(&self) -> PathBuf {
+        self.root.proc_path()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -120,13 +131,17 @@ pub(crate) fn collect(
 
     for (_, group) in groups {
         let scanned = if let Some(checkout) = &group.local_checkout {
-            let target = checkout.display().to_string();
+            let checkout_path = checkout.proc_path();
+            let target = checkout_path.display().to_string();
             let (reports, _) = registry::run_check(&[target], cfg).with_context(|| {
-                format!("could not deterministically scan {}", checkout.display())
+                format!(
+                    "could not deterministically scan {}",
+                    checkout.target.display()
+                )
             })?;
             ScannedAurPackage {
                 info: group.info,
-                checkout: Some(checkout.clone()),
+                checkout: Some(checkout_path),
                 reports,
             }
         } else {
@@ -259,19 +274,25 @@ fn collect_groups(targets: &[String]) -> anyhow::Result<BTreeMap<String, Package
     let mut names = Vec::new();
     for target in targets {
         let path = Path::new(target);
-        if path.exists() {
-            if !path.is_dir() {
-                anyhow::bail!("deep-scan target is not a build directory: {target}");
+        match fetch::SecureRoot::open_local_directory(path) {
+            Ok(root) => {
+                let metadata = parse_local_recipe_metadata_at(&root, path).with_context(|| {
+                    format!("could not establish local recipe identity for {target}")
+                })?;
+                local_directories.push((
+                    LocalCheckout {
+                        root,
+                        target: path.to_path_buf(),
+                    },
+                    metadata,
+                ));
             }
-            let directory = path
-                .canonicalize()
-                .with_context(|| format!("cannot resolve local build directory {target}"))?;
-            let metadata = parse_local_recipe_metadata(&directory).with_context(|| {
-                format!("could not establish local recipe identity for {target}")
-            })?;
-            local_directories.push((directory, metadata));
-        } else {
-            names.push(target.as_str());
+            Err(fetch::SecureOpenError::Absent) => names.push(target.as_str()),
+            Err(error) => {
+                return Err(anyhow::Error::new(error)).with_context(|| {
+                    format!("cannot securely open local build directory {target}")
+                });
+            }
         }
     }
 
@@ -307,7 +328,7 @@ fn collect_groups(targets: &[String]) -> anyhow::Result<BTreeMap<String, Package
 
 fn insert_local_group(
     groups: &mut BTreeMap<String, PackageGroup>,
-    directory: PathBuf,
+    checkout: LocalCheckout,
     metadata: LocalRecipeMetadata,
 ) -> anyhow::Result<()> {
     let LocalRecipeMetadata {
@@ -315,7 +336,12 @@ fn insert_local_group(
         package_names,
     } = metadata;
     match groups.get_mut(&pkgbase) {
-        Some(existing) if existing.local_checkout.as_ref() == Some(&directory) => {
+        Some(existing)
+            if existing
+                .local_checkout
+                .as_ref()
+                .is_some_and(|local| local.target == checkout.target) =>
+        {
             existing.requested_packages.extend(package_names);
         }
         Some(_) => anyhow::bail!("multiple targets resolve to pkgbase {pkgbase}"),
@@ -325,7 +351,7 @@ fn insert_local_group(
                 PackageGroup {
                     info: local_info(&pkgbase),
                     requested_packages: package_names.into_iter().collect(),
-                    local_checkout: Some(directory),
+                    local_checkout: Some(checkout),
                 },
             );
         }
@@ -335,35 +361,34 @@ fn insert_local_group(
 
 const MAX_LOCAL_METADATA_BYTES: u64 = 1024 * 1024;
 
+#[cfg(test)]
+fn parse_local_recipe_metadata(directory: &Path) -> anyhow::Result<LocalRecipeMetadata> {
+    let root = fetch::SecureRoot::open_local_directory(directory)
+        .map_err(anyhow::Error::new)
+        .with_context(|| {
+            format!(
+                "cannot securely open local recipe root {}",
+                directory.display()
+            )
+        })?;
+    parse_local_recipe_metadata_at(&root, directory)
+}
+
 /// Establish a local recipe's canonical package identity without evaluating
 /// any PKGBUILD code. A checked-in `.SRCINFO` is authoritative; otherwise a
 /// deliberately narrow literal PKGBUILD subset is the only accepted fallback.
-fn parse_local_recipe_metadata(directory: &Path) -> anyhow::Result<LocalRecipeMetadata> {
-    let canonical = directory.canonicalize().with_context(|| {
-        format!(
-            "cannot canonicalize local recipe root {}",
-            directory.display()
-        )
-    })?;
-    if canonical != directory {
-        anyhow::bail!(
-            "local recipe root must be canonical and must not use symlinked ancestors: {}",
-            directory.display()
-        );
-    }
-    let root = fetch::SecureRoot::open_canonical(&canonical).with_context(|| {
-        format!(
-            "cannot securely open local recipe root {}",
-            canonical.display()
-        )
-    })?;
+fn parse_local_recipe_metadata_at(
+    root: &fetch::SecureRoot,
+    directory: &Path,
+) -> anyhow::Result<LocalRecipeMetadata> {
+    let descriptor_path = root.proc_path();
     let pkgbuild = root
         .open_regular_file(Path::new("PKGBUILD"))
         .map_err(anyhow::Error::new)
         .with_context(|| {
             format!(
                 "cannot securely open PKGBUILD beneath {}",
-                canonical.display()
+                directory.display()
             )
         })?;
 
@@ -371,15 +396,15 @@ fn parse_local_recipe_metadata(directory: &Path) -> anyhow::Result<LocalRecipeMe
         Ok(srcinfo) => parse_srcinfo_metadata(&read_metadata_descriptor(
             srcinfo,
             ".SRCINFO",
-            &canonical.join(".SRCINFO"),
+            &descriptor_path.join(".SRCINFO"),
         )?),
         Err(fetch::SecureOpenError::Absent) => parse_literal_pkgbuild_metadata(
-            &read_metadata_descriptor(pkgbuild, "PKGBUILD", &canonical.join("PKGBUILD"))?,
+            &read_metadata_descriptor(pkgbuild, "PKGBUILD", &descriptor_path.join("PKGBUILD"))?,
         ),
         Err(error) => Err(anyhow::Error::new(error)).with_context(|| {
             format!(
                 "cannot securely open .SRCINFO beneath {}",
-                canonical.display()
+                directory.display()
             )
         }),
     }
@@ -921,6 +946,13 @@ mod tests {
         dir
     }
 
+    fn local_checkout(path: &Path) -> LocalCheckout {
+        LocalCheckout {
+            root: fetch::SecureRoot::open_local_directory(path).unwrap(),
+            target: path.to_path_buf(),
+        }
+    }
+
     #[test]
     fn local_srcinfo_identity_ignores_renamed_directory_and_preserves_split_names() {
         let dir = local_recipe(
@@ -928,16 +960,23 @@ mod tests {
             "pkgname=wrong-directory-name\n",
         );
 
-        let metadata = parse_local_recipe_metadata(dir.path()).unwrap();
-        assert_eq!(metadata.pkgbase, "canonical-base");
-        assert_eq!(metadata.package_names, vec!["a-split", "z-split"]);
-
-        let mut groups = BTreeMap::new();
-        insert_local_group(&mut groups, dir.path().to_path_buf(), metadata).unwrap();
+        let groups = collect_groups(&[dir.path().display().to_string()]).unwrap();
         let group = groups.get("canonical-base").unwrap();
         assert_eq!(
             group.requested_packages.iter().cloned().collect::<Vec<_>>(),
             vec!["a-split", "z-split"]
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                group
+                    .local_checkout
+                    .as_ref()
+                    .unwrap()
+                    .proc_path()
+                    .join("PKGBUILD")
+            )
+            .unwrap(),
+            "pkgname=wrong-directory-name\n"
         );
     }
 
@@ -989,6 +1028,27 @@ mod tests {
         )
         .unwrap();
         assert!(parse_local_recipe_metadata(missing_pkgbuild.path()).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_target_symlink_is_rejected_before_collection_can_start_later_work() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let recipe = parent.path().join("recipe");
+        std::fs::create_dir(&recipe).unwrap();
+        std::fs::write(recipe.join("PKGBUILD"), "pkgname=canonical\n").unwrap();
+        let target = parent.path().join("linked-recipe");
+        symlink("recipe", &target).unwrap();
+
+        match collect_groups(&[target.display().to_string()]) {
+            Ok(_) => panic!("a symlinked local target must be rejected"),
+            Err(error) => assert!(
+                format!("{error:#}").contains("final path component is a symlink"),
+                "unexpected error: {error:#}"
+            ),
+        };
     }
 
     #[cfg(unix)]
@@ -1066,18 +1126,20 @@ mod tests {
     #[test]
     fn local_metadata_reads_use_the_descriptor_anchored_secure_open_api() {
         let implementation = include_str!("deep_scan.rs")
-            .split("#[cfg(test)]")
+            .split("#[cfg(test)]\nmod tests")
             .next()
             .unwrap();
         let metadata_reader = implementation
-            .split("fn parse_local_recipe_metadata")
+            .split("fn parse_local_recipe_metadata_at")
             .nth(1)
             .unwrap()
             .split("fn parse_srcinfo_metadata")
             .next()
             .unwrap();
 
-        assert!(metadata_reader.contains("fetch::SecureRoot"));
+        assert!(implementation.contains("root: &fetch::SecureRoot"));
+        assert!(metadata_reader.contains("root.open_regular_file"));
+        assert!(metadata_reader.contains("root.proc_path"));
         assert!(!metadata_reader.contains("symlink_metadata"));
         assert!(!metadata_reader.contains("File::open"));
     }
@@ -1099,6 +1161,6 @@ mod tests {
             },
         );
 
-        assert!(insert_local_group(&mut groups, dir.path().to_path_buf(), metadata).is_err());
+        assert!(insert_local_group(&mut groups, local_checkout(dir.path()), metadata).is_err());
     }
 }

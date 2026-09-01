@@ -662,6 +662,74 @@ impl SecureRoot {
         Err(anyhow::anyhow!(SecureOpenError::UnsupportedPlatform))
     }
 
+    /// Open a user-supplied local directory without following a symlink in
+    /// any supplied path component. The returned descriptor pins the target
+    /// directory for callers that use its procfs path while retaining `self`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn open_local_directory(target: &Path) -> Result<Self, SecureOpenError> {
+        let mut directory = if target.is_absolute() {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)
+                .open("/")
+                .map_err(SecureOpenError::UnsafeAncestor)?
+        } else {
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK)
+                .open(".")
+                .map_err(SecureOpenError::UnsafeAncestor)?
+        };
+        let components: Vec<&OsStr> = target
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(Ok(name)),
+                Component::ParentDir => Some(Ok(OsStr::new(".."))),
+                Component::RootDir | Component::CurDir => None,
+                Component::Prefix(_) => {
+                    Some(Err(SecureOpenError::FinalComponent(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "path contains an unsupported prefix",
+                    ))))
+                }
+            })
+            .collect::<Result<_, _>>()?;
+
+        for (index, component) in components.iter().enumerate() {
+            let final_component = index + 1 == components.len();
+            directory = match openat_component(
+                &directory,
+                component,
+                O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK,
+            ) {
+                Ok(directory) => directory,
+                Err(error) if final_component && error.raw_os_error() == Some(ENOENT) => {
+                    return Err(SecureOpenError::Absent)
+                }
+                Err(error) if final_component && error.raw_os_error() == Some(ELOOP) => {
+                    return Err(SecureOpenError::FinalSymlink)
+                }
+                Err(error)
+                    if final_component
+                        && error.raw_os_error() == Some(ENOTDIR)
+                        && final_component_is_symlink(&directory, component) =>
+                {
+                    return Err(SecureOpenError::FinalSymlink)
+                }
+                Err(error) if final_component => {
+                    return Err(SecureOpenError::FinalComponent(error))
+                }
+                Err(error) => return Err(SecureOpenError::UnsafeAncestor(error)),
+            };
+        }
+        Ok(Self { directory })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub(crate) fn open_local_directory(_target: &Path) -> Result<Self, SecureOpenError> {
+        Err(SecureOpenError::UnsupportedPlatform)
+    }
+
     /// Open a regular file beneath this root without following any ancestor or
     /// final-component symlink. `O_NONBLOCK` ensures a special file cannot hang
     /// inspection before descriptor metadata rejects it.
@@ -723,12 +791,12 @@ impl SecureRoot {
     }
 
     #[cfg(target_os = "linux")]
-    fn proc_path(&self) -> PathBuf {
+    pub(crate) fn proc_path(&self) -> PathBuf {
         PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd()))
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn proc_path(&self) -> PathBuf {
+    pub(crate) fn proc_path(&self) -> PathBuf {
         PathBuf::new()
     }
 }
@@ -742,9 +810,13 @@ const O_NOFOLLOW: i32 = 0o400_000;
 #[cfg(target_os = "linux")]
 const O_NONBLOCK: i32 = 0o4_000;
 #[cfg(target_os = "linux")]
+const O_PATH: i32 = 0o10_000_000;
+#[cfg(target_os = "linux")]
 const ENOENT: i32 = 2;
 #[cfg(target_os = "linux")]
 const ELOOP: i32 = 40;
+#[cfg(target_os = "linux")]
+const ENOTDIR: i32 = 20;
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
@@ -768,6 +840,21 @@ fn openat_component(directory: &File, component: &OsStr, flags: i32) -> std::io:
     }
     // SAFETY: a nonnegative result from `openat` is a newly owned descriptor.
     Ok(unsafe { File::from_raw_fd(descriptor) })
+}
+
+/// Classify an `O_DIRECTORY | O_NOFOLLOW` `ENOTDIR` without allowing a
+/// classification race to authorize the component: this descriptor is only
+/// used to improve the rejection error, never as a successful open.
+#[cfg(target_os = "linux")]
+fn final_component_is_symlink(directory: &File, component: &OsStr) -> bool {
+    openat_component(
+        directory,
+        component,
+        O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK | O_PATH,
+    )
+    .and_then(|file| file.metadata())
+    .map(|metadata| metadata.file_type().is_symlink())
+    .unwrap_or(false)
 }
 
 fn sanitized_git_command(root: Option<&SecureRoot>) -> Command {
@@ -1447,6 +1534,37 @@ mod tests {
             root.open_regular_file(Path::new("final")),
             Err(SecureOpenError::FinalSymlink)
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_target_rejects_a_final_directory_symlink_and_holds_the_opened_directory() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let recipe = parent.path().join("recipe");
+        std::fs::create_dir(&recipe).unwrap();
+        std::fs::write(recipe.join("PKGBUILD"), b"pkgname=original\n").unwrap();
+        let target = parent.path().join("target");
+        symlink("recipe", &target).unwrap();
+
+        assert!(matches!(
+            SecureRoot::open_local_directory(&target),
+            Err(SecureOpenError::FinalSymlink)
+        ));
+
+        let absolute_recipe = recipe.canonicalize().unwrap();
+        let opened = SecureRoot::open_local_directory(&absolute_recipe).unwrap();
+        let current_directory = SecureRoot::open_local_directory(Path::new(".")).unwrap();
+        assert!(current_directory.proc_path().is_dir());
+        std::fs::rename(&recipe, parent.path().join("old-recipe")).unwrap();
+        std::fs::create_dir(&recipe).unwrap();
+        std::fs::write(recipe.join("PKGBUILD"), b"pkgname=replacement\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(opened.proc_path().join("PKGBUILD")).unwrap(),
+            "pkgname=original\n"
+        );
     }
 
     #[cfg(target_os = "linux")]
