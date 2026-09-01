@@ -145,6 +145,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurscan-llm"
+version = "0.2.3"
+dependencies = [
+ "anyhow",
+ "aurscan-core",
+ "blake3",
+ "dirs",
+ "redb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

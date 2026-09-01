@@ -1,9 +1,9 @@
 //! Tiered verdict policy generalizing the legacy `assess_package()` logic.
 //!
 //! 1. Any `Exact` finding at `Critical` -> Block, unconditionally.
-//! 2. Any finding >= `block_heuristic_at` -> Block.
-//! 3. Escalation: >= 3 findings at >= `advisory_at` from >= 3 distinct
-//!    detectors -> Block (weak signals co-occurring is the incident pattern).
+//! 2. Any block-eligible finding >= `block_heuristic_at` -> Block.
+//! 3. Escalation: >= 3 block-eligible findings at >= `advisory_at` from >= 3
+//!    distinct detectors -> Block (weak signals co-occurring is the incident pattern).
 //! 4. Any finding >= `advisory_at` -> Advisory.
 //! 5. Otherwise Clean (Info findings ride along in reports, not verdicts).
 
@@ -28,16 +28,25 @@ pub fn compute_verdict(findings: Vec<Finding>, policy: &VerdictPolicy) -> Verdic
     let exact_critical = findings
         .iter()
         .any(|f| f.severity == Severity::Critical && f.confidence == Confidence::Exact);
-    let heuristic_block = findings
+    let block_eligible: Vec<&Finding> = findings
         .iter()
-        .any(|f| f.severity >= policy.block_heuristic_at);
+        .filter(|finding| finding.confidence.block_eligible())
+        .collect();
+    let heuristic_block = block_eligible
+        .iter()
+        .any(|finding| finding.severity >= policy.block_heuristic_at);
+    let escalation: Vec<&&Finding> = block_eligible
+        .iter()
+        .filter(|finding| finding.severity >= policy.advisory_at)
+        .collect();
+    let distinct: std::collections::HashSet<_> =
+        escalation.iter().map(|finding| finding.detector).collect();
     let advisories: Vec<&Finding> = findings
         .iter()
-        .filter(|f| f.severity >= policy.advisory_at)
+        .filter(|finding| finding.severity >= policy.advisory_at)
         .collect();
-    let distinct: std::collections::HashSet<_> = advisories.iter().map(|f| f.detector).collect();
 
-    if exact_critical || heuristic_block || (advisories.len() >= 3 && distinct.len() >= 3) {
+    if exact_critical || heuristic_block || (escalation.len() >= 3 && distinct.len() >= 3) {
         Verdict::Block(findings)
     } else if !advisories.is_empty() {
         Verdict::Advisory(findings)
@@ -112,5 +121,34 @@ mod tests {
             &VerdictPolicy::default(),
         );
         assert!(matches!(v, Verdict::Clean));
+    }
+
+    #[test]
+    fn llm_findings_are_advisory_max_at_every_severity() {
+        for severity in [
+            Severity::Info,
+            Severity::Medium,
+            Severity::High,
+            Severity::Critical,
+        ] {
+            let verdict = compute_verdict(
+                vec![finding(severity, Confidence::Llm, "llm_other_semantic")],
+                &VerdictPolicy::default(),
+            );
+            assert!(!matches!(verdict, Verdict::Block(_)));
+        }
+    }
+
+    #[test]
+    fn llm_does_not_complete_distinct_detector_escalation() {
+        let verdict = compute_verdict(
+            vec![
+                finding(Severity::Medium, Confidence::Heuristic, "a"),
+                finding(Severity::Medium, Confidence::Heuristic, "b"),
+                finding(Severity::Medium, Confidence::Llm, "llm_other_semantic"),
+            ],
+            &VerdictPolicy::default(),
+        );
+        assert!(matches!(verdict, Verdict::Advisory(_)));
     }
 }

@@ -28,4 +28,5 @@ ureq = { version = "2", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 dirs = "5"
+url = "2"
 tempfile = "3"

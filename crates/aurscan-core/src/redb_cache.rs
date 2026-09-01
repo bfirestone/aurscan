@@ -58,6 +58,7 @@ fn confidence_to_parts(c: &Confidence) -> (u8, f32) {
         Confidence::Exact => (0, 0.0),
         Confidence::Heuristic => (1, 0.0),
         Confidence::Model(score) => (2, *score),
+        Confidence::Llm => (3, 0.0),
     }
 }
 
@@ -65,6 +66,8 @@ fn confidence_from_parts(kind: u8, score: f32) -> Confidence {
     match kind {
         0 => Confidence::Exact,
         1 => Confidence::Heuristic,
+        2 => Confidence::Model(score),
+        3 => Confidence::Llm,
         _ => Confidence::Model(score),
     }
 }
@@ -222,6 +225,60 @@ mod tests {
         assert_eq!(hit.findings.len(), 1);
         assert_eq!(hit.findings[0].detector.0, "ioc_tokens");
         assert_eq!(hit.findings[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn llm_confidence_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = super::RedbCache::open(&dir.path().join("t.redb")).unwrap();
+        let key = CacheKey {
+            content_hash: [8u8; 32],
+            detector: DetectorId("llm_other_semantic"),
+            ruleset_version: 1,
+            detector_epoch: 1,
+        };
+        let result = DetectorResult {
+            findings: vec![Finding {
+                severity: Severity::Medium,
+                confidence: Confidence::Llm,
+                detector: DetectorId("llm_other_semantic"),
+                package: "package".into(),
+                reason: "semantic finding".into(),
+                evidence: Evidence {
+                    location: "PKGBUILD:1".into(),
+                    excerpt: "content".into(),
+                },
+            }],
+            features: None,
+        };
+
+        cache.put(&key, &result);
+        let hit = cache.get(&key).expect("hit");
+
+        assert_eq!(hit.findings[0].confidence, Confidence::Llm);
+    }
+
+    #[test]
+    fn confidence_encoding_remains_backward_compatible() {
+        assert_eq!(super::confidence_to_parts(&Confidence::Exact), (0, 0.0));
+        assert_eq!(super::confidence_to_parts(&Confidence::Heuristic), (1, 0.0));
+        assert_eq!(
+            super::confidence_to_parts(&Confidence::Model(0.75)),
+            (2, 0.75)
+        );
+        assert_eq!(super::confidence_to_parts(&Confidence::Llm), (3, 0.0));
+
+        assert_eq!(super::confidence_from_parts(0, 0.0), Confidence::Exact);
+        assert_eq!(super::confidence_from_parts(1, 0.0), Confidence::Heuristic);
+        assert_eq!(
+            super::confidence_from_parts(2, 0.75),
+            Confidence::Model(0.75)
+        );
+        assert_eq!(super::confidence_from_parts(3, 0.0), Confidence::Llm);
+        assert_eq!(
+            super::confidence_from_parts(4, 0.25),
+            Confidence::Model(0.25)
+        );
     }
 
     #[test]

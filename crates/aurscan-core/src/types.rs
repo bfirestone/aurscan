@@ -16,6 +16,13 @@ pub enum Confidence {
     Exact,      // hash / literal IOC match
     Heuristic,  // rule-based inference
     Model(f32), // phase-2 ONNX score in [0,1]
+    Llm,        // untrusted semantic analysis; Advisory ceiling
+}
+
+impl Confidence {
+    pub fn block_eligible(&self) -> bool {
+        !matches!(self, Self::Llm)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -49,7 +56,7 @@ pub struct DetectorId(pub &'static str);
 #[derive(Debug, Clone, Serialize)]
 pub struct Evidence {
     pub location: String, // "path:line" or "archive!member@offset"
-    pub excerpt: String,  // matched content, capped at 200 chars
+    pub excerpt: String,  // grounded content, bounded by the producing detector/analyzer
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,5 +132,17 @@ mod contract {
         assert!(Severity::Critical > Severity::High);
         assert!(Severity::High > Severity::Medium);
         assert!(Severity::Medium > Severity::Info);
+    }
+
+    #[test]
+    fn llm_confidence_serializes_stably() {
+        assert_eq!(
+            serde_json::to_value(Confidence::Llm).unwrap(),
+            serde_json::json!("llm")
+        );
+        assert!(!Confidence::Llm.block_eligible());
+        assert!(Confidence::Exact.block_eligible());
+        assert!(Confidence::Heuristic.block_eligible());
+        assert!(Confidence::Model(0.5).block_eligible());
     }
 }
