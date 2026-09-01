@@ -65,6 +65,38 @@ pub fn head_commit(dir: &Path) -> anyhow::Result<String> {
     Ok(out.trim().to_string())
 }
 
+/// Whether `dir` is still at exactly `expected_head` with no tracked index or
+/// worktree changes. This deliberately bypasses repository hooks and disables
+/// fsmonitor: a clean-ledger reuse decision must only trust Git's direct index
+/// and worktree view. Untracked source downloads are intentionally excluded.
+pub fn checkout_matches_clean_head(dir: &Path, expected_head: &str) -> anyhow::Result<bool> {
+    let head = run(Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+        ])
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"]))?;
+    if head.trim() != expected_head {
+        return Ok(false);
+    }
+
+    let status = run(Command::new("git")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+        ])
+        .arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain=v1", "--untracked-files=no"]))?;
+    Ok(status.is_empty())
+}
+
 /// Run `makepkg --verifysource --noconfirm` in `dir` (downloads sources,
 /// executes nothing), then list the newly-materialized source files: every
 /// regular file in `dir` that isn't tracked by git and isn't a build script,
@@ -301,5 +333,65 @@ mod tests {
     #[test]
     fn which_returns_none_for_a_bogus_binary() {
         assert!(which("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    fn committed_checkout() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        run(Command::new("git").arg("init").arg(dir.path())).unwrap();
+        std::fs::write(dir.path().join("PKGBUILD"), "pkgname=demo\n").unwrap();
+        run(Command::new("git").arg("-C").arg(dir.path()).args([
+            "-c",
+            "user.name=aurscan test",
+            "-c",
+            "user.email=aurscan@example.invalid",
+            "add",
+            "PKGBUILD",
+        ]))
+        .unwrap();
+        run(Command::new("git").arg("-C").arg(dir.path()).args([
+            "-c",
+            "user.name=aurscan test",
+            "-c",
+            "user.email=aurscan@example.invalid",
+            "-c",
+            "commit.gpgSign=false",
+            "commit",
+            "-m",
+            "initial",
+        ]))
+        .unwrap();
+        let head = head_commit(dir.path()).unwrap();
+        (dir, head)
+    }
+
+    #[test]
+    fn checkout_state_accepts_a_matching_clean_head() {
+        let (dir, head) = committed_checkout();
+        assert!(checkout_matches_clean_head(dir.path(), &head).unwrap());
+    }
+
+    #[test]
+    fn checkout_state_rejects_a_mismatched_head() {
+        let (dir, _) = committed_checkout();
+        assert!(!checkout_matches_clean_head(dir.path(), "0".repeat(40).as_str()).unwrap());
+    }
+
+    #[test]
+    fn checkout_state_rejects_a_staged_tracked_modification() {
+        let (dir, head) = committed_checkout();
+        std::fs::write(dir.path().join("PKGBUILD"), "pkgname=changed\n").unwrap();
+        run(Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["add", "PKGBUILD"]))
+        .unwrap();
+        assert!(!checkout_matches_clean_head(dir.path(), &head).unwrap());
+    }
+
+    #[test]
+    fn checkout_state_rejects_an_unstaged_tracked_modification() {
+        let (dir, head) = committed_checkout();
+        std::fs::write(dir.path().join("PKGBUILD"), "pkgname=changed\n").unwrap();
+        assert!(!checkout_matches_clean_head(dir.path(), &head).unwrap());
     }
 }

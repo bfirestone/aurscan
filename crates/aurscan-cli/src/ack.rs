@@ -51,7 +51,13 @@ impl AckStore {
         } else {
             stable_package(&f.package)
         };
-        let h = blake3::hash(format!("{}|{}", location, f.evidence.excerpt).as_bytes());
+        let h = if is_llm {
+            llm_evidence_hash(&location, &f.evidence.excerpt)
+        } else {
+            // Keep the deterministic acknowledgement key byte-for-byte
+            // compatible with the established on-disk key format.
+            blake3::hash(format!("{}|{}", location, f.evidence.excerpt).as_bytes())
+        };
         format!("{}:{}:{}", package, f.detector.0, &h.to_hex()[..16])
     }
 
@@ -97,11 +103,22 @@ impl AckStore {
     }
 }
 
-/// The location, version-invariant. `archive!member` keeps only the member
-/// path (already version-free inside the archive). `path:line` drops the
-/// line number (they shift between releases while the excerpt pins the
-/// content) and keeps only the file's basename (clone/cache prefixes vary
-/// by invocation).
+/// Hash LLM evidence with a fixed-width length prefix for each field. The
+/// relative path and excerpt can contain every byte valid in Rust strings, so
+/// separator-based framing is ambiguous (for example `a|b` + `c` versus `a`
+/// + `b|c`).
+fn llm_evidence_hash(location: &str, excerpt: &str) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    for field in [location.as_bytes(), excerpt.as_bytes()] {
+        hasher.update(&(field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    hasher.finalize()
+}
+
+/// The normalized LLM bundle-relative location. `path:line` drops a trailing
+/// line or range because it can move while the producer-bounded excerpt stays
+/// the same; unlike deterministic keys, the complete relative path remains.
 fn stable_llm_location(location: &str) -> String {
     match location.rsplit_once(':') {
         Some((path, suffix)) if is_line_or_range(suffix) => path.to_string(),
@@ -581,6 +598,17 @@ mod tests {
     }
 
     #[test]
+    fn llm_key_length_frames_path_and_excerpt() {
+        let path_with_separator = llm_finding("a|b:1", "c");
+        let excerpt_with_separator = llm_finding("a:1", "b|c");
+
+        assert_ne!(
+            AckStore::key(&path_with_separator),
+            AckStore::key(&excerpt_with_separator)
+        );
+    }
+
+    #[test]
     fn llm_ack_selection_refuses_incomplete_analysis_before_returning_findings() {
         use crate::deep_scan::{DeepPackageReport, DeepRun};
         use aurscan_core::{PackageReport, Verdict};
@@ -604,6 +632,7 @@ mod tests {
                     usage: None,
                     reason: Some("truncated".into()),
                 },
+                bundle_hash: None,
                 coverage: BundleCoverage {
                     mode: CoverageMode::GitTracked,
                     included_files: 1,
@@ -643,6 +672,7 @@ mod tests {
                     usage: None,
                     reason: None,
                 },
+                bundle_hash: None,
                 coverage: BundleCoverage {
                     mode: CoverageMode::GitTracked,
                     included_files: 1,

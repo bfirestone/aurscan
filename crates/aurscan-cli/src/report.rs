@@ -242,8 +242,8 @@ pub(crate) fn render_deep_json(
             );
             analysis.insert(
                 "bundle_hash".into(),
-                identity.map_or(serde_json::Value::Null, |identity| {
-                    serde_json::Value::String(hex_bytes(&identity.bundle_hash))
+                package.bundle_hash.map_or(serde_json::Value::Null, |hash| {
+                    serde_json::Value::String(hex_bytes(&hash))
                 }),
             );
             analysis.insert(
@@ -316,8 +316,8 @@ pub(crate) fn render_deep_text(
         aurscan_llm::REVIEW_STRATEGY_ID,
         aurscan_llm::PROMPT_VERSION,
         preflight.package_count,
-        preflight.original_bytes,
-        preflight.encoded_request_bytes,
+        preflight_byte_count(preflight.original_bytes),
+        preflight_byte_count(preflight.encoded_request_bytes),
         preflight.large_request_mode,
     );
     for package in &run.packages {
@@ -403,6 +403,12 @@ pub(crate) fn render_deep_text(
         "LLM summary: completed={completed}, cache-hit={cache_hits}, unavailable={unavailable}, incomplete={incomplete}"
     );
     out
+}
+
+fn preflight_byte_count(bytes: Option<usize>) -> String {
+    bytes
+        .map(|bytes| bytes.to_string())
+        .unwrap_or_else(|| "unmeasured".to_string())
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {
@@ -758,6 +764,7 @@ mod tests {
                     }),
                     reason: (status != AnalysisStatus::Completed).then(|| "offline".into()),
                 },
+                bundle_hash: Some([0xab; 32]),
                 coverage: BundleCoverage {
                     mode: CoverageMode::GitTracked,
                     included_files: 2,
@@ -780,8 +787,8 @@ mod tests {
             endpoint_host: "localhost".into(),
             model: "pinned-model".into(),
             package_count: 4,
-            original_bytes: 100,
-            encoded_request_bytes: 400,
+            original_bytes: Some(100),
+            encoded_request_bytes: Some(400),
             large_request_mode: false,
         };
         let json = render_deep_json(&run, &preflight);
@@ -832,6 +839,7 @@ mod tests {
                     usage: None,
                     reason: Some("offline".into()),
                 },
+                bundle_hash: None,
                 coverage: BundleCoverage {
                     mode: CoverageMode::ConservativeLocal,
                     included_files: 0,
@@ -845,8 +853,8 @@ mod tests {
             endpoint_host: "localhost".into(),
             model: "model".into(),
             package_count: 1,
-            original_bytes: 0,
-            encoded_request_bytes: 0,
+            original_bytes: Some(0),
+            encoded_request_bytes: Some(0),
             large_request_mode: false,
         };
 
@@ -854,6 +862,84 @@ mod tests {
         assert_eq!(analysis.get("bundle_hash"), Some(&serde_json::Value::Null));
         assert!(analysis.get("source").is_none());
         assert!(analysis.get("usage").is_none());
+    }
+
+    #[test]
+    fn deep_json_preserves_valid_bundle_hash_when_analyzer_is_unavailable_and_marks_bytes_unmeasured(
+    ) {
+        use crate::deep_scan::{DeepPackageReport, DeepPreflight, DeepRun};
+        use aurscan_llm::{AnalysisOutcome, AnalysisStatus, BundleCoverage, CoverageMode};
+
+        let unavailable = DeepPackageReport {
+            pkgbase: "valid-bundle".into(),
+            requested_packages: vec!["valid-bundle".into()],
+            combined: report("valid-bundle", Verdict::Clean, vec![]),
+            analysis: AnalysisOutcome {
+                status: AnalysisStatus::Unavailable,
+                source: None,
+                findings: vec![],
+                identity: None,
+                usage: None,
+                reason: Some("offline".into()),
+            },
+            bundle_hash: Some([0xcd; 32]),
+            coverage: BundleCoverage {
+                mode: CoverageMode::GitTracked,
+                included_files: 1,
+                excluded_binary_files: vec![],
+                excluded_symlinks: vec![],
+            },
+        };
+        let bundle_failure = DeepPackageReport {
+            pkgbase: "bundle-failure".into(),
+            requested_packages: vec!["bundle-failure".into()],
+            combined: report("bundle-failure", Verdict::Clean, vec![]),
+            analysis: AnalysisOutcome {
+                status: AnalysisStatus::Incomplete,
+                source: None,
+                findings: vec![],
+                identity: None,
+                usage: None,
+                reason: Some("bundle failed".into()),
+            },
+            bundle_hash: None,
+            coverage: BundleCoverage {
+                mode: CoverageMode::ConservativeLocal,
+                included_files: 0,
+                excluded_binary_files: vec![],
+                excluded_symlinks: vec![],
+            },
+        };
+        let run = DeepRun {
+            packages: vec![unavailable, bundle_failure],
+            exit_code: 3,
+        };
+        let preflight = DeepPreflight {
+            endpoint_host: "localhost".into(),
+            model: "model".into(),
+            package_count: 1,
+            original_bytes: None,
+            encoded_request_bytes: None,
+            large_request_mode: false,
+        };
+
+        let json = render_deep_json(&run, &preflight);
+        assert_eq!(
+            json["packages"][0]["analysis"]["bundle_hash"],
+            "cd".repeat(32)
+        );
+        assert_eq!(
+            json["packages"][1]["analysis"]["bundle_hash"],
+            serde_json::Value::Null
+        );
+        assert_eq!(json["preflight"]["original_bytes"], serde_json::Value::Null);
+        assert_eq!(
+            json["preflight"]["encoded_request_bytes"],
+            serde_json::Value::Null
+        );
+        let text = render_deep_text(&run, &preflight, &AckStore::from_keys([]), false, false);
+        assert!(text.contains("original bytes=unmeasured"));
+        assert!(text.contains("encoded bytes=unmeasured"));
     }
 
     #[test]
@@ -875,6 +961,7 @@ mod tests {
                     usage: None,
                     reason: None,
                 },
+                bundle_hash: None,
                 coverage: BundleCoverage {
                     mode: CoverageMode::ConservativeLocal,
                     included_files: 1,
@@ -888,8 +975,8 @@ mod tests {
             endpoint_host: "localhost".into(),
             model: "model".into(),
             package_count: 1,
-            original_bytes: 10,
-            encoded_request_bytes: 100,
+            original_bytes: Some(10),
+            encoded_request_bytes: Some(100),
             large_request_mode: false,
         };
         let text = render_deep_text(&run, &preflight, &AckStore::from_keys([]), false, false);

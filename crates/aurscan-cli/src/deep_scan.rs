@@ -14,6 +14,7 @@ use aurscan_llm::{
     ValidatedLlmConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub(crate) struct DeepPackageReport {
@@ -21,6 +22,7 @@ pub(crate) struct DeepPackageReport {
     pub requested_packages: Vec<String>,
     pub combined: PackageReport,
     pub analysis: AnalysisOutcome,
+    pub bundle_hash: Option<[u8; 32]>,
     pub coverage: BundleCoverage,
 }
 
@@ -33,8 +35,8 @@ pub(crate) struct DeepPreflight {
     pub endpoint_host: String,
     pub model: String,
     pub package_count: usize,
-    pub original_bytes: usize,
-    pub encoded_request_bytes: usize,
+    pub original_bytes: Option<usize>,
+    pub encoded_request_bytes: Option<usize>,
     pub large_request_mode: bool,
 }
 
@@ -49,10 +51,17 @@ struct PackageGroup {
     local_checkout: Option<PathBuf>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct LocalRecipeMetadata {
+    pkgbase: String,
+    package_names: Vec<String>,
+}
+
 struct PreparedPackage {
     scanned: ScannedAurPackage,
     requested_packages: Vec<String>,
     bundle: Option<RecipeBundle>,
+    bundle_hash: Option<[u8; 32]>,
     coverage: BundleCoverage,
     analysis: Option<AnalysisOutcome>,
 }
@@ -135,6 +144,7 @@ pub(crate) fn collect(
                 coverage: bundle.coverage.clone(),
                 scanned,
                 requested_packages,
+                bundle_hash: Some(bundle.content_hash),
                 bundle: Some(bundle),
                 analysis: None,
             }),
@@ -142,6 +152,7 @@ pub(crate) fn collect(
                 coverage: empty_coverage(checkout),
                 scanned,
                 requested_packages,
+                bundle_hash: None,
                 bundle: None,
                 analysis: Some(failure_outcome(
                     AnalysisStatus::Incomplete,
@@ -160,8 +171,8 @@ pub(crate) fn collect(
         endpoint_host,
         model: llm.model().to_string(),
         package_count: 0,
-        original_bytes: 0,
-        encoded_request_bytes: 0,
+        original_bytes: None,
+        encoded_request_bytes: None,
         large_request_mode: llm.uses_large_requests(),
     };
     let ready_indices: Vec<usize> = prepared
@@ -229,6 +240,7 @@ pub(crate) fn collect(
             requested_packages: package.requested_packages,
             combined,
             analysis,
+            bundle_hash: package.bundle_hash,
             coverage: package.coverage,
         });
     }
@@ -251,13 +263,13 @@ fn collect_groups(targets: &[String]) -> anyhow::Result<BTreeMap<String, Package
             if !path.is_dir() {
                 anyhow::bail!("deep-scan target is not a build directory: {target}");
             }
-            if !path.join("PKGBUILD").is_file() {
-                anyhow::bail!("local build directory has no PKGBUILD: {target}");
-            }
-            local_directories.push(
-                path.canonicalize()
-                    .with_context(|| format!("cannot resolve local build directory {target}"))?,
-            );
+            let directory = path
+                .canonicalize()
+                .with_context(|| format!("cannot resolve local build directory {target}"))?;
+            let metadata = parse_local_recipe_metadata(&directory).with_context(|| {
+                format!("could not establish local recipe identity for {target}")
+            })?;
+            local_directories.push((directory, metadata));
         } else {
             names.push(target.as_str());
         }
@@ -287,32 +299,266 @@ fn collect_groups(targets: &[String]) -> anyhow::Result<BTreeMap<String, Package
         );
     }
 
-    for directory in local_directories {
-        let pkgbase = directory
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("local build directory has no package name"))?;
-        match groups.get_mut(&pkgbase) {
-            Some(existing) if existing.local_checkout.as_ref() == Some(&directory) => {
-                existing.requested_packages.insert(pkgbase);
-            }
-            Some(_) => anyhow::bail!("multiple targets resolve to pkgbase {pkgbase}"),
-            None => {
-                let mut requested_packages = BTreeSet::new();
-                requested_packages.insert(pkgbase.clone());
-                groups.insert(
-                    pkgbase.clone(),
-                    PackageGroup {
-                        info: local_info(&pkgbase),
-                        requested_packages,
-                        local_checkout: Some(directory),
-                    },
-                );
-            }
-        }
+    for (directory, metadata) in local_directories {
+        insert_local_group(&mut groups, directory, metadata)?;
     }
     Ok(groups)
+}
+
+fn insert_local_group(
+    groups: &mut BTreeMap<String, PackageGroup>,
+    directory: PathBuf,
+    metadata: LocalRecipeMetadata,
+) -> anyhow::Result<()> {
+    let LocalRecipeMetadata {
+        pkgbase,
+        package_names,
+    } = metadata;
+    match groups.get_mut(&pkgbase) {
+        Some(existing) if existing.local_checkout.as_ref() == Some(&directory) => {
+            existing.requested_packages.extend(package_names);
+        }
+        Some(_) => anyhow::bail!("multiple targets resolve to pkgbase {pkgbase}"),
+        None => {
+            groups.insert(
+                pkgbase.clone(),
+                PackageGroup {
+                    info: local_info(&pkgbase),
+                    requested_packages: package_names.into_iter().collect(),
+                    local_checkout: Some(directory),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+const MAX_LOCAL_METADATA_BYTES: u64 = 1024 * 1024;
+
+/// Establish a local recipe's canonical package identity without evaluating
+/// any PKGBUILD code. A checked-in `.SRCINFO` is authoritative; otherwise a
+/// deliberately narrow literal PKGBUILD subset is the only accepted fallback.
+fn parse_local_recipe_metadata(directory: &Path) -> anyhow::Result<LocalRecipeMetadata> {
+    ensure_regular_recipe_file(&directory.join("PKGBUILD"), "PKGBUILD")?;
+    let srcinfo = directory.join(".SRCINFO");
+    match std::fs::symlink_metadata(&srcinfo) {
+        Ok(_) => parse_srcinfo_metadata(&read_regular_metadata_file(&srcinfo, ".SRCINFO")?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let pkgbuild = directory.join("PKGBUILD");
+            parse_literal_pkgbuild_metadata(&read_regular_metadata_file(&pkgbuild, "PKGBUILD")?)
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("cannot inspect local metadata {}", srcinfo.display())),
+    }
+}
+
+fn ensure_regular_recipe_file(path: &Path, label: &str) -> anyhow::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("cannot inspect {label} at {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!(
+            "{label} must be a regular non-symlink file: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn read_regular_metadata_file(path: &Path, label: &str) -> anyhow::Result<String> {
+    ensure_regular_recipe_file(path, label)?;
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("cannot inspect {label} at {}", path.display()))?;
+    if metadata.len() > MAX_LOCAL_METADATA_BYTES {
+        anyhow::bail!(
+            "{label} exceeds the local metadata size limit: {}",
+            path.display()
+        );
+    }
+
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    std::fs::File::open(path)
+        .with_context(|| format!("cannot read {label} at {}", path.display()))?
+        .take(MAX_LOCAL_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("cannot read {label} at {}", path.display()))?;
+    if bytes.len() as u64 > MAX_LOCAL_METADATA_BYTES {
+        anyhow::bail!(
+            "{label} exceeds the local metadata size limit: {}",
+            path.display()
+        );
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("{label} must be valid UTF-8: {}", path.display()))
+}
+
+fn parse_srcinfo_metadata(content: &str) -> anyhow::Result<LocalRecipeMetadata> {
+    let mut pkgbase = None;
+    let mut package_names = BTreeSet::new();
+    for (line_number, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("malformed .SRCINFO metadata at line {}", line_number + 1)
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty()
+            || value.is_empty()
+            || !key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            anyhow::bail!("malformed .SRCINFO metadata at line {}", line_number + 1);
+        }
+        match key {
+            "pkgbase" => {
+                if pkgbase.is_some() || !is_valid_package_name(value) {
+                    anyhow::bail!("ambiguous or invalid pkgbase in .SRCINFO");
+                }
+                pkgbase = Some(value.to_string());
+            }
+            "pkgname"
+                if !is_valid_package_name(value) || !package_names.insert(value.to_string()) =>
+            {
+                anyhow::bail!("ambiguous or invalid pkgname in .SRCINFO");
+            }
+            "pkgname" => {}
+            _ => {}
+        }
+    }
+    local_metadata_from_parts(pkgbase, package_names, ".SRCINFO")
+}
+
+fn parse_literal_pkgbuild_metadata(content: &str) -> anyhow::Result<LocalRecipeMetadata> {
+    let mut pkgbase = None;
+    let mut package_names = BTreeSet::new();
+    let mut saw_pkgname = false;
+    for (line_number, line) in content.lines().enumerate() {
+        let candidate = line.trim_start();
+        if (candidate.starts_with("pkgbase") || candidate.starts_with("pkgname"))
+            && candidate != line
+        {
+            anyhow::bail!(
+                "non-literal local package metadata in PKGBUILD at line {}",
+                line_number + 1
+            );
+        }
+        if let Some(value) = candidate.strip_prefix("pkgbase=") {
+            if pkgbase.is_some() {
+                anyhow::bail!("ambiguous pkgbase in PKGBUILD at line {}", line_number + 1);
+            }
+            let values = parse_literal_package_values(value).with_context(|| {
+                format!(
+                    "invalid literal pkgbase in PKGBUILD at line {}",
+                    line_number + 1
+                )
+            })?;
+            if values.len() != 1 {
+                anyhow::bail!(
+                    "invalid literal pkgbase in PKGBUILD at line {}",
+                    line_number + 1
+                );
+            }
+            pkgbase = values.into_iter().next();
+        } else if let Some(value) = candidate.strip_prefix("pkgname=") {
+            if saw_pkgname {
+                anyhow::bail!("ambiguous pkgname in PKGBUILD at line {}", line_number + 1);
+            }
+            saw_pkgname = true;
+            let values = parse_literal_package_values(value).with_context(|| {
+                format!(
+                    "invalid literal pkgname in PKGBUILD at line {}",
+                    line_number + 1
+                )
+            })?;
+            for value in values {
+                if !package_names.insert(value) {
+                    anyhow::bail!("ambiguous pkgname in PKGBUILD at line {}", line_number + 1);
+                }
+            }
+        } else if candidate.starts_with("pkgbase") || candidate.starts_with("pkgname") {
+            anyhow::bail!(
+                "non-literal local package metadata in PKGBUILD at line {}",
+                line_number + 1
+            );
+        }
+    }
+
+    if pkgbase.is_none() && package_names.len() == 1 {
+        pkgbase = package_names.iter().next().cloned();
+    }
+    local_metadata_from_parts(pkgbase, package_names, "PKGBUILD")
+}
+
+fn parse_literal_package_values(value: &str) -> anyhow::Result<Vec<String>> {
+    let value = value.trim();
+    let body = if let Some(body) = value.strip_prefix('(') {
+        body.strip_suffix(')')
+            .ok_or_else(|| anyhow::anyhow!("unterminated literal array"))?
+    } else {
+        value
+    };
+    let mut values = Vec::new();
+    let mut remaining = body.trim();
+    while !remaining.is_empty() {
+        let (value, rest) =
+            if let Some(quote) = remaining.chars().next().filter(|c| matches!(c, '\'' | '"')) {
+                let after_quote = &remaining[quote.len_utf8()..];
+                let end = after_quote
+                    .find(quote)
+                    .ok_or_else(|| anyhow::anyhow!("unterminated quoted literal"))?;
+                let value = &after_quote[..end];
+                let rest = &after_quote[end + quote.len_utf8()..];
+                if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+                    anyhow::bail!("non-literal package value");
+                }
+                (value, rest)
+            } else {
+                let end = remaining
+                    .find(char::is_whitespace)
+                    .unwrap_or(remaining.len());
+                (&remaining[..end], &remaining[end..])
+            };
+        if !is_valid_package_name(value) {
+            anyhow::bail!("invalid literal package name");
+        }
+        values.push(value.to_string());
+        remaining = rest.trim_start();
+    }
+    if values.is_empty() {
+        anyhow::bail!("missing literal package name");
+    }
+    Ok(values)
+}
+
+fn local_metadata_from_parts(
+    pkgbase: Option<String>,
+    package_names: BTreeSet<String>,
+    source: &str,
+) -> anyhow::Result<LocalRecipeMetadata> {
+    let pkgbase =
+        pkgbase.ok_or_else(|| anyhow::anyhow!("missing canonical pkgbase in {source}"))?;
+    if package_names.is_empty() {
+        anyhow::bail!("missing canonical pkgname entries in {source}");
+    }
+    Ok(LocalRecipeMetadata {
+        pkgbase,
+        package_names: package_names.into_iter().collect(),
+    })
+}
+
+fn is_valid_package_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'_' | b'+' | b'-')
+        })
 }
 
 fn unresolved_requested_names<'a>(requested: &[&'a str], infos: &[AurInfo]) -> Vec<&'a str> {
@@ -370,16 +616,16 @@ fn summarize_preflight(
     summary: &mut DeepPreflight,
     metrics: &[RequestPreflight],
 ) -> anyhow::Result<()> {
-    summary.original_bytes = metrics.iter().try_fold(0usize, |total, metric| {
+    summary.original_bytes = Some(metrics.iter().try_fold(0usize, |total, metric| {
         total
             .checked_add(metric.original_bytes)
             .ok_or_else(|| anyhow::anyhow!("original preflight byte count overflow"))
-    })?;
-    summary.encoded_request_bytes = metrics.iter().try_fold(0usize, |total, metric| {
+    })?);
+    summary.encoded_request_bytes = Some(metrics.iter().try_fold(0usize, |total, metric| {
         total
             .checked_add(metric.encoded_request_bytes)
             .ok_or_else(|| anyhow::anyhow!("encoded preflight byte count overflow"))
-    })?;
+    })?);
     Ok(())
 }
 
@@ -391,10 +637,16 @@ fn print_preflight(preflight: &DeepPreflight) {
         aurscan_llm::REVIEW_STRATEGY_ID,
         aurscan_llm::PROMPT_VERSION,
         preflight.package_count,
-        preflight.original_bytes,
-        preflight.encoded_request_bytes,
+        preflight_byte_count(preflight.original_bytes),
+        preflight_byte_count(preflight.encoded_request_bytes),
         preflight.large_request_mode,
     );
+}
+
+fn preflight_byte_count(bytes: Option<usize>) -> String {
+    bytes
+        .map(|bytes| bytes.to_string())
+        .unwrap_or_else(|| "unmeasured".to_string())
 }
 
 fn empty_coverage(checkout: &Path) -> BundleCoverage {
@@ -514,6 +766,7 @@ mod tests {
                 features: vec![],
             },
             analysis: outcome(status, vec![]),
+            bundle_hash: None,
             coverage: BundleCoverage {
                 mode: CoverageMode::GitTracked,
                 included_files: 1,
@@ -619,5 +872,150 @@ mod tests {
             popularity: 0.0,
             num_votes: 0,
         }
+    }
+
+    fn local_recipe(srcinfo: Option<&str>, pkgbuild: &str) -> tempfile::TempDir {
+        let dir = tempfile::Builder::new()
+            .prefix("renamed-directory-")
+            .tempdir()
+            .unwrap();
+        std::fs::write(dir.path().join("PKGBUILD"), pkgbuild).unwrap();
+        if let Some(srcinfo) = srcinfo {
+            std::fs::write(dir.path().join(".SRCINFO"), srcinfo).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn local_srcinfo_identity_ignores_renamed_directory_and_preserves_split_names() {
+        let dir = local_recipe(
+            Some("pkgbase = canonical-base\n\tpkgname = z-split\n\tpkgname = a-split\n"),
+            "pkgname=wrong-directory-name\n",
+        );
+
+        let metadata = parse_local_recipe_metadata(dir.path()).unwrap();
+        assert_eq!(metadata.pkgbase, "canonical-base");
+        assert_eq!(metadata.package_names, vec!["a-split", "z-split"]);
+
+        let mut groups = BTreeMap::new();
+        insert_local_group(&mut groups, dir.path().to_path_buf(), metadata).unwrap();
+        let group = groups.get("canonical-base").unwrap();
+        assert_eq!(
+            group.requested_packages.iter().cloned().collect::<Vec<_>>(),
+            vec!["a-split", "z-split"]
+        );
+    }
+
+    #[test]
+    fn literal_pkgbuild_metadata_establishes_split_canonical_identity_without_execution() {
+        let dir = local_recipe(
+            None,
+            "pkgbase=canonical-base\npkgname=('z-split' 'a-split')\npkgver=1\n",
+        );
+
+        let metadata = parse_local_recipe_metadata(dir.path()).unwrap();
+        assert_eq!(metadata.pkgbase, "canonical-base");
+        assert_eq!(metadata.package_names, vec!["a-split", "z-split"]);
+    }
+
+    #[test]
+    fn local_metadata_rejects_ambiguous_or_dynamic_recipe_identity() {
+        let ambiguous = local_recipe(
+            Some("pkgbase = first\npkgbase = second\npkgname = first\n"),
+            "pkgname=first\n",
+        );
+        assert!(parse_local_recipe_metadata(ambiguous.path()).is_err());
+
+        let dynamic = local_recipe(None, "pkgbase=$(printf base)\npkgname=base\n");
+        assert!(parse_local_recipe_metadata(dynamic.path()).is_err());
+
+        let nested_dynamic = local_recipe(
+            None,
+            "pkgbase=canonical\npkgname=canonical\nprepare() {\n  pkgbase=$(printf other)\n}\n",
+        );
+        assert!(parse_local_recipe_metadata(nested_dynamic.path()).is_err());
+    }
+
+    #[test]
+    fn local_metadata_rejects_malformed_or_incomplete_srcinfo() {
+        let malformed = local_recipe(
+            Some("pkgbase canonical\npkgname = canonical\n"),
+            "pkgname=x\n",
+        );
+        assert!(parse_local_recipe_metadata(malformed.path()).is_err());
+
+        let incomplete = local_recipe(Some("pkgbase = canonical\n"), "pkgname=x\n");
+        assert!(parse_local_recipe_metadata(incomplete.path()).is_err());
+
+        let missing_pkgbuild = tempfile::tempdir().unwrap();
+        std::fs::write(
+            missing_pkgbuild.path().join(".SRCINFO"),
+            "pkgbase = canonical\npkgname = canonical\n",
+        )
+        .unwrap();
+        assert!(parse_local_recipe_metadata(missing_pkgbuild.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_metadata_rejects_symlinked_metadata_files() {
+        use std::os::unix::fs::symlink;
+
+        let srcinfo_target = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            srcinfo_target.path(),
+            "pkgbase = canonical\npkgname = canonical\n",
+        )
+        .unwrap();
+        let srcinfo_recipe = local_recipe(None, "pkgname=canonical\n");
+        symlink(
+            srcinfo_target.path(),
+            srcinfo_recipe.path().join(".SRCINFO"),
+        )
+        .unwrap();
+        assert!(parse_local_recipe_metadata(srcinfo_recipe.path()).is_err());
+
+        let pkgbuild_target = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(pkgbuild_target.path(), "pkgname=canonical\n").unwrap();
+        let pkgbuild_recipe = tempfile::tempdir().unwrap();
+        symlink(
+            pkgbuild_target.path(),
+            pkgbuild_recipe.path().join("PKGBUILD"),
+        )
+        .unwrap();
+        assert!(parse_local_recipe_metadata(pkgbuild_recipe.path()).is_err());
+    }
+
+    #[test]
+    fn local_metadata_rejects_oversized_files_before_scanning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PKGBUILD"), "pkgname=canonical\n").unwrap();
+        std::fs::write(
+            dir.path().join(".SRCINFO"),
+            vec![b'x'; MAX_LOCAL_METADATA_BYTES as usize + 1],
+        )
+        .unwrap();
+
+        assert!(parse_local_recipe_metadata(dir.path()).is_err());
+    }
+
+    #[test]
+    fn local_and_named_targets_cannot_collide_at_a_canonical_pkgbase() {
+        let dir = local_recipe(
+            Some("pkgbase = canonical-base\npkgname = local-split\n"),
+            "pkgname=local-split\n",
+        );
+        let metadata = parse_local_recipe_metadata(dir.path()).unwrap();
+        let mut groups = BTreeMap::new();
+        groups.insert(
+            "canonical-base".into(),
+            PackageGroup {
+                info: aur_info("named-split", "canonical-base"),
+                requested_packages: BTreeSet::from(["named-split".into()]),
+                local_checkout: None,
+            },
+        );
+
+        assert!(insert_local_group(&mut groups, dir.path().to_path_buf(), metadata).is_err());
     }
 }

@@ -99,66 +99,125 @@ pub(crate) fn fetch_and_scan(
     });
     let plan = fetch_plan(clean_at_remote_head, require_checkout);
 
-    if clean_at_remote_head {
-        let head = remote_head.as_deref().expect("clean remote head exists");
-        eprintln!(
-            "==> aurscan: {} unchanged since its last clean scan ({}), fetch skipped",
-            report::terminal_safe(&info.name),
-            &head[..7.min(head.len())]
-        );
-    }
-
-    let clean_reports = || {
-        vec![PackageReport {
-            package: info.name.clone(),
-            verdict: aurscan_core::Verdict::Clean,
-            findings: Vec::new(),
-            features: Vec::new(),
-        }]
-    };
     match plan {
-        FetchPlan::SkipWithoutCheckout => Ok(ScannedAurPackage {
-            info: info.clone(),
-            checkout: None,
-            reports: clean_reports(),
-        }),
-        FetchPlan::EnsureCheckoutAndSkipSources => {
-            let dir = fetch::sync_pkgbase(&info.package_base)?;
+        FetchPlan::SkipWithoutCheckout => {
+            let head = remote_head.as_deref().expect("clean remote head exists");
+            eprintln!(
+                "==> aurscan: {} unchanged since its last clean scan ({}), fetch skipped",
+                report::terminal_safe(&info.name),
+                &head[..7.min(head.len())]
+            );
             Ok(ScannedAurPackage {
                 info: info.clone(),
-                checkout: Some(dir),
-                reports: clean_reports(),
+                checkout: None,
+                reports: clean_reports(info),
             })
+        }
+        FetchPlan::EnsureCheckoutAndSkipSources => {
+            let dir = fetch::sync_pkgbase(&info.package_base)?;
+            let expected_head = remote_head.as_deref().expect("clean remote head exists");
+            if fetch::checkout_matches_clean_head(&dir, expected_head).unwrap_or(false) {
+                eprintln!(
+                    "==> aurscan: {} checkout synchronized at {}, source verification skipped",
+                    report::terminal_safe(&info.name),
+                    &expected_head[..7.min(expected_head.len())]
+                );
+                return Ok(ScannedAurPackage {
+                    info: info.clone(),
+                    checkout: Some(dir),
+                    reports: clean_reports(info),
+                });
+            }
+
+            // The remote may have advanced between ls-remote and sync, or a
+            // checkout may contain tracked changes. Scan this exact already-
+            // synchronized directory rather than trusting the stale ledger.
+            full_scan_synchronized_checkout(
+                &dir,
+                info,
+                cfg,
+                &mut ledger,
+                ruleset_version,
+                detector_epoch,
+            )
         }
         FetchPlan::FullScan => {
             let dir = fetch::sync_pkgbase(&info.package_base)?;
-            let source_files = fetch::verifysource(&dir)?;
-            let scan_result = scan_dir_pipeline(
+            full_scan_synchronized_checkout(
                 &dir,
-                &info.name,
-                &info.version,
-                Some(info.to_metadata()),
-                &source_files,
+                info,
                 cfg,
-            );
-            let reports = after_completed_scan(scan_result, |reports| {
-                // Record *after* scanning, with the verdict: the pre-ledger
-                // version of this wrote the commit before the scan ran, so it
-                // could never say whether the commit was safe to skip.
-                if let Ok(commit) = fetch::head_commit(&dir) {
-                    ledger.record(
-                        &info.package_base,
-                        ledger_entry(commit, reports, ruleset_version, detector_epoch),
-                    );
-                }
-            })?;
-            Ok(ScannedAurPackage {
-                info: info.clone(),
-                checkout: Some(dir),
-                reports,
-            })
+                &mut ledger,
+                ruleset_version,
+                detector_epoch,
+            )
         }
     }
+}
+
+fn clean_reports(info: &AurInfo) -> Vec<PackageReport> {
+    vec![PackageReport {
+        package: info.name.clone(),
+        verdict: aurscan_core::Verdict::Clean,
+        findings: Vec::new(),
+        features: Vec::new(),
+    }]
+}
+
+fn full_scan_synchronized_checkout(
+    dir: &Path,
+    info: &AurInfo,
+    cfg: &Config,
+    ledger: &mut crate::commit_ledger::CommitLedger,
+    ruleset_version: u32,
+    detector_epoch: u32,
+) -> anyhow::Result<ScannedAurPackage> {
+    // Bind the scan to a clean HEAD before it starts and verify the same state
+    // again afterward. A dirty tree is scanned for safety but can never update
+    // the commit ledger, even if it is later cleaned while scanning.
+    let scanned_head = fetch::head_commit(dir).ok();
+    let clean_before_scan = scanned_head
+        .as_deref()
+        .is_some_and(|head| fetch::checkout_matches_clean_head(dir, head).unwrap_or(false));
+    let source_files = fetch::verifysource(dir)?;
+    let scan_result = scan_dir_pipeline(
+        dir,
+        &info.name,
+        &info.version,
+        Some(info.to_metadata()),
+        &source_files,
+        cfg,
+    );
+    let reports = after_completed_scan(scan_result, |reports| {
+        let clean_after_scan = scanned_head
+            .as_deref()
+            .is_some_and(|head| fetch::checkout_matches_clean_head(dir, head).unwrap_or(false));
+        if can_record_scanned_checkout(scanned_head.as_deref(), clean_before_scan, clean_after_scan)
+        {
+            ledger.record(
+                &info.package_base,
+                ledger_entry(
+                    scanned_head.expect("recordable checkout has a scanned HEAD"),
+                    reports,
+                    ruleset_version,
+                    detector_epoch,
+                ),
+            );
+        }
+    })?;
+    Ok(ScannedAurPackage {
+        info: info.clone(),
+        checkout: Some(dir.to_path_buf()),
+        reports,
+    })
+}
+
+fn can_record_scanned_checkout(
+    scanned_head: Option<&str>,
+    clean_before_scan: bool,
+    clean_after_scan: bool,
+) -> bool {
+    scanned_head.is_some() && clean_before_scan && clean_after_scan
 }
 
 fn after_completed_scan(
@@ -418,5 +477,14 @@ mod tests {
         let reports = after_completed_scan(Ok(completed), |_| recorded += 1).unwrap();
         assert_eq!(reports.len(), 1);
         assert_eq!(recorded, 1);
+    }
+
+    #[test]
+    fn full_scan_ledger_recording_requires_bound_clean_content_before_and_after_scan() {
+        assert!(can_record_scanned_checkout(Some("commit"), true, true));
+        assert!(!can_record_scanned_checkout(None, true, true));
+        assert!(!can_record_scanned_checkout(Some("commit"), false, true));
+        assert!(!can_record_scanned_checkout(Some("commit"), true, false));
+        assert!(!can_record_scanned_checkout(None, false, false));
     }
 }
