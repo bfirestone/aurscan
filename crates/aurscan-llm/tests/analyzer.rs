@@ -496,9 +496,10 @@ fn identity_covers_all_fixed_versions_bytes_origin_model_and_request_profile() {
     assert_eq!(identity.model_id, "batch-model");
     assert_eq!(identity.review_strategy_id, REVIEW_STRATEGY_ID);
     assert_eq!(identity.prompt_version, PROMPT_VERSION);
-    assert_eq!(
+    assert_ne!(
         identity.prompt_hash,
-        *blake3::hash(include_bytes!("../prompts/v1/system.txt")).as_bytes()
+        *blake3::hash(include_bytes!("../prompts/v1/system.txt")).as_bytes(),
+        "prompt identity must cover the fixed envelope, not only system.txt"
     );
     assert_eq!(identity.response_schema_version, RESPONSE_SCHEMA_VERSION);
     assert_eq!(

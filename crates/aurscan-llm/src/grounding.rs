@@ -66,7 +66,7 @@ pub(crate) fn ground_response(
     max_excerpt_bytes: usize,
 ) -> Result<GroundingResult, String> {
     let candidate: CandidateResponse = serde_json::from_str(content)
-        .map_err(|error| format!("invalid candidate response JSON: {error}"))?;
+        .map_err(|_| "candidate response was structurally invalid".to_owned())?;
     if candidate.findings.len() > max_findings {
         return Err(format!(
             "candidate finding count {} exceeds limit {max_findings}",

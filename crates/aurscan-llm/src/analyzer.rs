@@ -45,7 +45,7 @@ impl Analyzer {
         options: AnalyzeOptions,
     ) -> Vec<AnalysisOutcome> {
         let mut outcomes = vec![None; bundles.len()];
-        let mut pending = Vec::new();
+        let mut misses = Vec::new();
 
         for (index, bundle) in bundles.iter().enumerate() {
             let identity = self.analysis_identity(bundle);
@@ -60,44 +60,16 @@ impl Analyzer {
                     continue;
                 }
             }
-            match prepare_request(bundle, &self.config, identity.clone()) {
-                Ok(request) => pending.push(PendingRequest {
-                    index,
-                    identity,
-                    request: request.0,
-                    encoded_body: request.1,
-                }),
-                Err(error) => {
-                    outcomes[index] = Some(failure_outcome(
-                        AnalysisStatus::Incomplete,
-                        None,
-                        identity,
-                        error.to_string(),
-                    ));
-                }
-            }
+            misses.push(PendingMiss { index, identity });
         }
 
-        let miss_count = pending.len()
-            + outcomes
-                .iter()
-                .filter(|outcome| {
-                    matches!(
-                        outcome,
-                        Some(AnalysisOutcome {
-                            source: None,
-                            status: AnalysisStatus::Incomplete,
-                            ..
-                        })
-                    )
-                })
-                .count();
-        if miss_count > self.config.max_requests_per_run {
-            for pending_request in pending {
-                outcomes[pending_request.index] = Some(failure_outcome(
+        if misses.len() > self.config.max_requests_per_run {
+            let miss_count = misses.len();
+            for pending in misses {
+                outcomes[pending.index] = Some(failure_outcome(
                     AnalysisStatus::Incomplete,
                     None,
-                    pending_request.identity,
+                    pending.identity,
                     format!(
                         "cache miss count {miss_count} exceeds request cap {}",
                         self.config.max_requests_per_run
@@ -107,129 +79,138 @@ impl Analyzer {
             return finish_outcomes(outcomes);
         }
 
-        let mut sendable = Vec::new();
-        for pending_request in pending {
-            if pending_request.encoded_body.len() > self.config.max_request_bytes {
-                outcomes[pending_request.index] = Some(failure_outcome(
+        let mut api_key = None;
+        let mut misses = misses.into_iter();
+        while let Some(pending) = misses.next() {
+            let (request, encoded_body) = match prepare_request(
+                &bundles[pending.index],
+                &self.config,
+                pending.identity.clone(),
+            ) {
+                Ok(prepared) => prepared,
+                Err(_) => {
+                    outcomes[pending.index] = Some(failure_outcome(
+                        AnalysisStatus::Incomplete,
+                        None,
+                        pending.identity,
+                        "request rendering failed".into(),
+                    ));
+                    continue;
+                }
+            };
+            if encoded_body.len() > self.config.max_request_bytes {
+                outcomes[pending.index] = Some(failure_outcome(
                     AnalysisStatus::Incomplete,
                     None,
-                    pending_request.identity,
+                    pending.identity,
                     format!(
                         "encoded request size {} exceeds byte limit {}",
-                        pending_request.encoded_body.len(),
+                        encoded_body.len(),
                         self.config.max_request_bytes
                     ),
                 ));
-            } else {
-                sendable.push(pending_request);
+                continue;
             }
-        }
 
-        let api_key = if sendable.is_empty() {
-            None
-        } else {
-            match load_api_key(&self.config) {
-                Ok(api_key) => api_key,
-                Err(error) => {
-                    let reason = error.to_string();
-                    for pending_request in sendable {
-                        outcomes[pending_request.index] = Some(failure_outcome(
+            if api_key.is_none() {
+                match load_api_key(&self.config) {
+                    Ok(loaded) => api_key = Some(loaded),
+                    Err(error) => {
+                        let reason = error.to_string();
+                        outcomes[pending.index] = Some(failure_outcome(
                             AnalysisStatus::Unavailable,
                             None,
-                            pending_request.identity,
+                            pending.identity,
                             reason.clone(),
                         ));
+                        for remaining in misses {
+                            outcomes[remaining.index] = Some(failure_outcome(
+                                AnalysisStatus::Unavailable,
+                                None,
+                                remaining.identity,
+                                reason.clone(),
+                            ));
+                        }
+                        return finish_outcomes(outcomes);
                     }
-                    return finish_outcomes(outcomes);
                 }
             }
-        };
 
-        for pending_request in sendable {
-            let provider_response = self.provider.send(
+            let response = match self.provider.send(
                 &self.config,
-                &pending_request.request,
-                &pending_request.encoded_body,
-                api_key.as_ref(),
-            );
-            let response = match provider_response {
+                &request,
+                &encoded_body,
+                api_key.as_ref().and_then(Option::as_ref),
+            ) {
                 Ok(response) => response,
                 Err(error) => {
-                    outcomes[pending_request.index] = Some(failure_outcome(
+                    outcomes[pending.index] = Some(failure_outcome(
                         AnalysisStatus::Unavailable,
                         Some(AnalysisSource::Provider),
-                        pending_request.identity,
+                        pending.identity,
                         error.to_string(),
                     ));
                     continue;
                 }
             };
 
+            let finish_complete = response.finish_reason == "stop";
             let grounded = match ground_response(
                 &response.content,
-                &bundles[pending_request.index],
+                &bundles[pending.index],
                 self.config.max_findings,
                 self.config.max_evidence_lines,
                 self.config.max_excerpt_bytes,
             ) {
                 Ok(grounded) => grounded,
                 Err(reason) => {
-                    let reason = if response.finish_reason == "stop" {
-                        reason
-                    } else {
-                        format!(
-                            "provider finish_reason {:?} was incomplete; {reason}",
-                            response.finish_reason
-                        )
-                    };
-                    outcomes[pending_request.index] = Some(AnalysisOutcome {
+                    outcomes[pending.index] = Some(AnalysisOutcome {
                         status: AnalysisStatus::Incomplete,
                         source: Some(AnalysisSource::Provider),
                         findings: Vec::new(),
-                        identity: Some(pending_request.identity),
+                        identity: Some(pending.identity),
                         usage: response.usage,
-                        reason: Some(reason),
+                        reason: Some(if finish_complete {
+                            reason
+                        } else {
+                            "provider response was incomplete".into()
+                        }),
                     });
                     continue;
                 }
             };
 
-            let finish_complete = response.finish_reason == "stop";
             let fully_grounded = grounded.rejected_reasons.is_empty();
-            let findings =
-                materialize_claims(&grounded.claims, &bundles[pending_request.index].pkgbase);
+            let findings = materialize_claims(&grounded.claims, &bundles[pending.index].pkgbase);
             if finish_complete && fully_grounded {
                 let completed = CompletedClaims {
-                    identity: pending_request.identity.clone(),
+                    identity: pending.identity.clone(),
                     claims: grounded.claims,
                     usage: response.usage,
                     analysed_at: analysed_at(),
                 };
-                self.cache.put(&pending_request.identity, &completed);
-                outcomes[pending_request.index] = Some(AnalysisOutcome {
+                self.cache.put(&pending.identity, &completed);
+                outcomes[pending.index] = Some(AnalysisOutcome {
                     status: AnalysisStatus::Completed,
                     source: Some(AnalysisSource::Provider),
                     findings,
-                    identity: Some(pending_request.identity),
+                    identity: Some(pending.identity),
                     usage: response.usage,
                     reason: None,
                 });
             } else {
-                let mut reasons = Vec::new();
-                if !finish_complete {
-                    reasons.push(format!(
-                        "provider finish_reason {:?} was incomplete",
-                        response.finish_reason
-                    ));
-                }
-                reasons.extend(grounded.rejected_reasons);
-                outcomes[pending_request.index] = Some(AnalysisOutcome {
+                let reason = if !finish_complete {
+                    "provider response was incomplete".into()
+                } else {
+                    grounded.rejected_reasons.join("; ")
+                };
+                outcomes[pending.index] = Some(AnalysisOutcome {
                     status: AnalysisStatus::Incomplete,
                     source: Some(AnalysisSource::Provider),
                     findings,
-                    identity: Some(pending_request.identity),
+                    identity: Some(pending.identity),
                     usage: response.usage,
-                    reason: Some(reasons.join("; ")),
+                    reason: Some(reason),
                 });
             }
         }
@@ -247,11 +228,9 @@ impl PackageAnalyzer for Analyzer {
     }
 }
 
-struct PendingRequest {
+struct PendingMiss {
     index: usize,
     identity: AnalysisIdentity,
-    request: ProviderRequest,
-    encoded_body: Vec<u8>,
 }
 
 fn prepare_request(
@@ -351,4 +330,54 @@ fn analysed_at() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::{BundleCoverage, CoverageMode, LlmConfig, RecipeFile};
+
+    fn bundle(hash: u8) -> crate::types::RecipeBundle {
+        crate::types::RecipeBundle {
+            pkgbase: format!("package-{hash}"),
+            aur_commit: None,
+            content_hash: [hash; 32],
+            files: vec![RecipeFile {
+                path: "PKGBUILD".into(),
+                content: "x".repeat(1024 * 1024),
+            }],
+            coverage: BundleCoverage {
+                mode: CoverageMode::GitTracked,
+                included_files: 1,
+                excluded_binary_files: vec![],
+                excluded_symlinks: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn over_cap_preflight_does_not_render_requests() {
+        let config = LlmConfig {
+            endpoint: "http://127.0.0.1:9/v1".into(),
+            model: "test".into(),
+            max_requests_per_run: 1,
+            ..LlmConfig::default()
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let analyzer = super::Analyzer::with_cache_path(
+            crate::config::validate_config(&config).unwrap(),
+            directory.path().join("cache.redb"),
+        )
+        .unwrap();
+        crate::prompt::reset_render_count();
+
+        let outcomes = analyzer.analyze_batch(
+            &[bundle(1), bundle(2)],
+            crate::types::AnalyzeOptions { refresh: false },
+        );
+
+        assert_eq!(crate::prompt::render_count(), 0);
+        assert!(outcomes
+            .iter()
+            .all(|outcome| outcome.status == crate::types::AnalysisStatus::Incomplete));
+    }
 }

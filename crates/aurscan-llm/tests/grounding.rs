@@ -231,6 +231,35 @@ fn malformed_json_and_unknown_fields_are_incomplete() {
 }
 
 #[test]
+fn hostile_parser_diagnostics_never_reach_public_reasons() {
+    let hostile = format!("attacker\n\u{202e}{}", "x".repeat(10_000));
+    let mut unknown_field = serde_json::Map::new();
+    unknown_field.insert("findings".into(), json!([]));
+    unknown_field.insert(hostile.clone(), json!(true));
+    let unknown_enum = json!({"findings": [{
+        "kind": hostile,
+        "severity": "high",
+        "file": "PKGBUILD",
+        "start_line": 1,
+        "end_line": 1,
+        "reason": "Suspicious behavior has an attacker path and impact."
+    }]});
+
+    for raw in [
+        serde_json::Value::Object(unknown_field).to_string(),
+        unknown_enum.to_string(),
+    ] {
+        let outcome = run_raw(raw, |_| {});
+        assert_eq!(outcome.status, AnalysisStatus::Incomplete);
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("candidate response was structurally invalid")
+        );
+        assert!(outcome.reason.as_deref().unwrap().len() < 100);
+    }
+}
+
+#[test]
 fn excess_finding_count_invalidates_the_response() {
     let candidate = finding(
         "PKGBUILD",

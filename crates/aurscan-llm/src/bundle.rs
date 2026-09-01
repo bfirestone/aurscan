@@ -3,9 +3,9 @@ use crate::types::{
 };
 use anyhow::{anyhow, bail, Context};
 use std::fs;
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[cfg(target_os = "linux")]
 use std::ffi::{CString, OsStr};
@@ -38,24 +38,16 @@ impl RecipeBundleBuilder for DefaultRecipeBundleBuilder {
         let root_directory = open_root_directory(&root)?;
         let git_backed = root.join(".git").exists();
         let paths = if git_backed {
-            git_tracked_paths(&root)?
+            git_tracked_paths(&root, limits)?
         } else {
-            conservative_paths(&root)?
+            conservative_paths(&root, limits)?
         };
         let mut excluded_binary_files = Vec::new();
         let mut excluded_symlinks = Vec::new();
         let mut files = Vec::new();
         let mut total_bytes = 0usize;
 
-        for relative_path in paths {
-            let normalized = normalize_relative_path(&relative_path)?;
-            if normalized
-                .rsplit('/')
-                .next()
-                .is_some_and(|name| name == ".SRCINFO")
-            {
-                continue;
-            }
+        for normalized in paths {
             let mut opened = match open_file_beneath(&root_directory, &normalized) {
                 Ok(file) => file,
                 Err(SecureOpenError::FinalSymlink) => {
@@ -82,6 +74,15 @@ impl RecipeBundleBuilder for DefaultRecipeBundleBuilder {
                 );
             }
 
+            let projected_bytes = total_bytes
+                .checked_add(metadata.len() as usize)
+                .ok_or_else(|| anyhow!("aggregate bundle byte count overflow"))?;
+            if projected_bytes > limits.max_bundle_bytes {
+                bail!(
+                    "aggregate bundle byte limit exceeded: {projected_bytes} > {}",
+                    limits.max_bundle_bytes
+                );
+            }
             let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
             opened
                 .by_ref()
@@ -95,6 +96,15 @@ impl RecipeBundleBuilder for DefaultRecipeBundleBuilder {
                     limits.max_file_bytes
                 );
             }
+            total_bytes = total_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| anyhow!("aggregate bundle byte count overflow"))?;
+            if total_bytes > limits.max_bundle_bytes {
+                bail!(
+                    "aggregate bundle byte limit exceeded: {total_bytes} > {}",
+                    limits.max_bundle_bytes
+                );
+            }
             if bytes.contains(&0) {
                 excluded_binary_files.push(normalized);
                 continue;
@@ -104,18 +114,6 @@ impl RecipeBundleBuilder for DefaultRecipeBundleBuilder {
                 continue;
             };
 
-            if files.len() == limits.max_files {
-                bail!("file count limit exceeded: more than {}", limits.max_files);
-            }
-            total_bytes = total_bytes
-                .checked_add(content.len())
-                .ok_or_else(|| anyhow!("aggregate bundle byte count overflow"))?;
-            if total_bytes > limits.max_bundle_bytes {
-                bail!(
-                    "aggregate bundle byte limit exceeded: {total_bytes} > {}",
-                    limits.max_bundle_bytes
-                );
-            }
             files.push(RecipeFile {
                 path: normalized,
                 content,
@@ -160,33 +158,169 @@ impl RecipeBundleBuilder for DefaultRecipeBundleBuilder {
     }
 }
 
-fn git_tracked_paths(root: &Path) -> anyhow::Result<Vec<String>> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "-z", "--"])
-        .output()
-        .context("failed to run git ls-files")?;
-    if !output.status.success() {
-        bail!("git ls-files failed for recipe root");
-    }
-    let mut paths = Vec::new();
-    for raw in output.stdout.split(|byte| *byte == 0) {
-        if raw.is_empty() {
-            continue;
+const PROCESS_MAX_CANDIDATES: usize = 256;
+const PROCESS_MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
+const PROCESS_MAX_BUNDLE_BYTES: usize = 8 * 1024 * 1024;
+const PROCESS_MAX_PATH_BYTES: usize = 2 * 1024 * 1024;
+const PROCESS_MAX_DISCOVERED_ENTRIES: usize = 4096;
+const PROCESS_MAX_DISCOVERY_PATH_BYTES: usize = 8 * 1024 * 1024;
+
+struct CollectionBudget {
+    max_candidates: usize,
+    max_selected_path_bytes: usize,
+    candidates: usize,
+    selected_path_bytes: usize,
+    discovered_entries: usize,
+    discovery_path_bytes: usize,
+}
+
+impl CollectionBudget {
+    fn new(limits: BundleLimits) -> anyhow::Result<Self> {
+        if limits.max_files > PROCESS_MAX_CANDIDATES {
+            bail!("file count limit exceeds process maximum {PROCESS_MAX_CANDIDATES}");
         }
-        paths.push(
-            String::from_utf8(raw.to_vec())
-                .map_err(|_| anyhow!("tracked recipe path is not valid UTF-8"))?,
-        );
+        if limits.max_file_bytes > PROCESS_MAX_FILE_BYTES {
+            bail!("per-file limit exceeds process maximum {PROCESS_MAX_FILE_BYTES}");
+        }
+        if limits.max_bundle_bytes > PROCESS_MAX_BUNDLE_BYTES {
+            bail!("bundle limit exceeds process maximum {PROCESS_MAX_BUNDLE_BYTES}");
+        }
+        Ok(Self {
+            max_candidates: limits.max_files,
+            max_selected_path_bytes: PROCESS_MAX_DISCOVERY_PATH_BYTES,
+            candidates: 0,
+            selected_path_bytes: 0,
+            discovered_entries: 0,
+            discovery_path_bytes: 0,
+        })
+    }
+
+    fn discover(&mut self, path_bytes: usize) -> anyhow::Result<()> {
+        if path_bytes > PROCESS_MAX_PATH_BYTES {
+            bail!("recipe path exceeds process path-byte limit");
+        }
+        self.discovered_entries += 1;
+        self.discovery_path_bytes = self
+            .discovery_path_bytes
+            .checked_add(path_bytes)
+            .ok_or_else(|| anyhow!("discovery path-byte count overflow"))?;
+        if self.discovered_entries > PROCESS_MAX_DISCOVERED_ENTRIES
+            || self.discovery_path_bytes > PROCESS_MAX_DISCOVERY_PATH_BYTES
+        {
+            bail!("recipe discovery exceeds process-safety limits");
+        }
+        Ok(())
+    }
+
+    fn select(&mut self, path_bytes: usize) -> anyhow::Result<()> {
+        self.candidates += 1;
+        self.selected_path_bytes = self
+            .selected_path_bytes
+            .checked_add(path_bytes)
+            .ok_or_else(|| anyhow!("selected path-byte count overflow"))?;
+        if self.candidates > self.max_candidates {
+            bail!(
+                "file count limit exceeded: more than {}",
+                self.max_candidates
+            );
+        }
+        if self.selected_path_bytes > self.max_selected_path_bytes {
+            bail!("selected recipe paths exceed aggregate path-byte limit");
+        }
+        Ok(())
+    }
+}
+
+fn git_tracked_paths(root: &Path, limits: BundleLimits) -> anyhow::Result<Vec<String>> {
+    let mut child = sanitized_git_command(root)
+        .args(["ls-files", "-z", "--"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to run git ls-files")?;
+    let stdout = child.stdout.take().expect("piped stdout is available");
+    let mut reader = BufReader::new(stdout);
+    let mut raw = Vec::new();
+    let mut paths = Vec::new();
+    let mut budget = CollectionBudget::new(limits)?;
+    let collected = (|| -> anyhow::Result<()> {
+        while read_bounded_nul_record(&mut reader, &mut raw)? {
+            if raw.is_empty() {
+                continue;
+            }
+            budget.discover(raw.len())?;
+            let path = std::str::from_utf8(&raw)
+                .map_err(|_| anyhow!("tracked recipe path is not valid UTF-8"))?;
+            let normalized = normalize_relative_path(path)?;
+            if is_srcinfo(&normalized) {
+                continue;
+            }
+            budget.select(normalized.len())?;
+            paths.push(normalized);
+        }
+        Ok(())
+    })();
+    if let Err(error) = collected {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    if !child.wait()?.success() {
+        bail!("git ls-files failed for recipe root");
     }
     Ok(paths)
 }
 
+fn read_bounded_nul_record(
+    reader: &mut impl BufRead,
+    record: &mut Vec<u8>,
+) -> anyhow::Result<bool> {
+    record.clear();
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(!record.is_empty());
+        }
+        let delimiter = available.iter().position(|byte| *byte == 0);
+        let take = delimiter.unwrap_or(available.len());
+        if record.len() + take > PROCESS_MAX_PATH_BYTES {
+            bail!("tracked recipe path exceeds process path-byte limit");
+        }
+        record.extend_from_slice(&available[..take]);
+        reader.consume(take + usize::from(delimiter.is_some()));
+        if delimiter.is_some() {
+            return Ok(true);
+        }
+    }
+}
+
+fn sanitized_git_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .env_clear()
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "-C",
+        ])
+        .arg(root);
+    command
+}
+
 fn git_head(root: &Path) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
+    let output = sanitized_git_command(root)
         .args(["rev-parse", "HEAD"])
         .output()
         .ok()?;
@@ -198,23 +332,30 @@ fn git_head(root: &Path) -> Option<String> {
     (!commit.is_empty()).then(|| commit.to_owned())
 }
 
-fn conservative_paths(root: &Path) -> anyhow::Result<Vec<String>> {
-    fn visit(root: &Path, directory: &Path, paths: &mut Vec<String>) -> anyhow::Result<()> {
+fn conservative_paths(root: &Path, limits: BundleLimits) -> anyhow::Result<Vec<String>> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        paths: &mut Vec<String>,
+        budget: &mut CollectionBudget,
+    ) -> anyhow::Result<()> {
         for entry in fs::read_dir(directory)
             .with_context(|| format!("cannot read recipe directory {}", directory.display()))?
         {
             let entry = entry?;
             let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)?;
-            if metadata.is_dir() {
-                visit(root, &path, paths)?;
-                continue;
-            }
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| anyhow!("recipe path escaped its root"))?;
             let normalized = normalize_path(relative)?;
+            budget.discover(normalized.len())?;
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                visit(root, &path, paths, budget)?;
+                continue;
+            }
             if is_conservative_candidate(&normalized) {
+                budget.select(normalized.len())?;
                 paths.push(normalized);
             }
         }
@@ -222,8 +363,13 @@ fn conservative_paths(root: &Path) -> anyhow::Result<Vec<String>> {
     }
 
     let mut paths = Vec::new();
-    visit(root, root, &mut paths)?;
+    let mut budget = CollectionBudget::new(limits)?;
+    visit(root, root, &mut paths, &mut budget)?;
     Ok(paths)
+}
+
+fn is_srcinfo(path: &str) -> bool {
+    path.rsplit('/').next() == Some(".SRCINFO")
 }
 
 fn is_conservative_candidate(path: &str) -> bool {

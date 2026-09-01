@@ -366,17 +366,21 @@ fn only_the_first_choice_is_interpreted() {
 
 #[test]
 fn non_stop_finish_reason_is_incomplete() {
-    let server = Server::one("200 OK", &[], response(r#"{"findings":[]}"#, "length"));
+    let hostile_finish = format!("attacker\n\u{202e}{}", "x".repeat(10_000));
+    let server = Server::one(
+        "200 OK",
+        &[],
+        response(r#"{"findings":[]}"#, &hostile_finish),
+    );
     let dir = TempDir::new().unwrap();
     let analyzer = analyzer(&server, &dir, ResponseFormat::JsonSchema, None);
 
     let outcome = analyzer.analyze_batch(&[bundle()], AnalyzeOptions { refresh: false });
 
     assert_eq!(outcome[0].status, AnalysisStatus::Incomplete);
-    assert!(outcome[0]
-        .reason
-        .as_deref()
-        .unwrap()
-        .contains("finish_reason"));
+    assert_eq!(
+        outcome[0].reason.as_deref(),
+        Some("provider response was incomplete")
+    );
     let _ = server.request();
 }

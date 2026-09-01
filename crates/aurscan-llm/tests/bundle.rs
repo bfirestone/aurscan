@@ -2,7 +2,10 @@ use aurscan_llm::{BundleLimits, CoverageMode, DefaultRecipeBundleBuilder, Recipe
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
+
+static GIT_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn write(root: &Path, path: &str, content: &[u8]) {
     let path = root.join(path);
@@ -22,11 +25,13 @@ fn git(root: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed");
 }
 
-fn init_git(root: &Path) {
+fn init_git(root: &Path) -> MutexGuard<'static, ()> {
+    let guard = GIT_ENV_LOCK.lock().unwrap();
     git(root, &["init", "-q"]);
     git(root, &["config", "user.name", "Aurscan Test"]);
     git(root, &["config", "user.email", "aurscan@example.invalid"]);
     git(root, &["config", "commit.gpgsign", "false"]);
+    guard
 }
 
 fn generous_limits() -> BundleLimits {
@@ -40,7 +45,7 @@ fn generous_limits() -> BundleLimits {
 #[test]
 fn git_mode_uses_only_tracked_working_tree_files_and_excludes_srcinfo() {
     let dir = TempDir::new().unwrap();
-    init_git(dir.path());
+    let _git_environment = init_git(dir.path());
     write(dir.path(), "PKGBUILD", b"pkgname=old\n");
     write(dir.path(), "hooks/post.install", b"post_install() { :; }\n");
     write(dir.path(), ".SRCINFO", b"pkgbase = ignored\n");
@@ -116,7 +121,7 @@ fn final_component_symlinks_are_never_followed_and_are_reported() {
 
     let dir = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();
-    init_git(dir.path());
+    let _git_environment = init_git(dir.path());
     write(dir.path(), "PKGBUILD", b"pkgname=demo\n");
     write(outside.path(), "secret", b"must not be read\n");
     symlink(
@@ -142,7 +147,7 @@ fn a_symlinked_ancestor_is_rejected_without_reading_outside_the_root() {
 
     let dir = TempDir::new().unwrap();
     let outside = TempDir::new().unwrap();
-    init_git(dir.path());
+    let _git_environment = init_git(dir.path());
     write(dir.path(), "PKGBUILD", b"pkgname=demo\n");
     write(dir.path(), "tracked/inside.patch", b"tracked content\n");
     git(dir.path(), &["add", "PKGBUILD", "tracked/inside.patch"]);
@@ -168,7 +173,7 @@ fn a_symlinked_ancestor_is_rejected_without_reading_outside_the_root() {
 #[test]
 fn binary_and_non_utf8_files_are_excluded_and_reported() {
     let dir = TempDir::new().unwrap();
-    init_git(dir.path());
+    let _git_environment = init_git(dir.path());
     write(dir.path(), "PKGBUILD", b"pkgname=demo\n");
     write(dir.path(), "nul.helper", b"before\0after");
     write(dir.path(), "invalid.helper", &[0xff, 0xfe]);
@@ -269,6 +274,167 @@ fn per_file_limit_rejects_the_whole_bundle() {
         )
         .unwrap_err();
     assert!(error.to_string().contains("per-file"));
+}
+
+#[test]
+fn git_binary_exclusions_count_toward_the_file_limit() {
+    let dir = TempDir::new().unwrap();
+    let _git_environment = init_git(dir.path());
+    write(dir.path(), "PKGBUILD", b"x");
+    write(dir.path(), "binary.patch", b"\0binary");
+    git(dir.path(), &["add", "PKGBUILD", "binary.patch"]);
+
+    let error = DefaultRecipeBundleBuilder
+        .build(
+            dir.path(),
+            "demo",
+            BundleLimits {
+                max_files: 1,
+                ..generous_limits()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("file count"));
+}
+
+#[test]
+fn local_binary_exclusions_count_toward_the_file_limit() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "PKGBUILD", b"x");
+    write(dir.path(), "binary.patch", b"\0binary");
+    let error = DefaultRecipeBundleBuilder
+        .build(
+            dir.path(),
+            "demo",
+            BundleLimits {
+                max_files: 1,
+                ..generous_limits()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("file count"));
+}
+
+#[test]
+fn git_binary_exclusions_count_toward_aggregate_bytes() {
+    let dir = TempDir::new().unwrap();
+    let _git_environment = init_git(dir.path());
+    write(dir.path(), "PKGBUILD", b"x");
+    write(dir.path(), "binary.patch", b"\0binary");
+    git(dir.path(), &["add", "PKGBUILD", "binary.patch"]);
+    let error = DefaultRecipeBundleBuilder
+        .build(
+            dir.path(),
+            "demo",
+            BundleLimits {
+                max_bundle_bytes: 7,
+                ..generous_limits()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("aggregate"));
+}
+
+#[test]
+fn local_binary_exclusions_count_toward_aggregate_bytes() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "PKGBUILD", b"x");
+    write(dir.path(), "binary.patch", b"\0binary");
+
+    let error = DefaultRecipeBundleBuilder
+        .build(
+            dir.path(),
+            "demo",
+            BundleLimits {
+                max_bundle_bytes: 7,
+                ..generous_limits()
+            },
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("aggregate"));
+}
+
+#[test]
+fn ambient_foreign_git_index_cannot_select_private_untracked_files() {
+    let dir = TempDir::new().unwrap();
+    let _git_environment = init_git(dir.path());
+    write(dir.path(), "PKGBUILD", b"pkgname=demo\n");
+    write(dir.path(), "private.patch", b"private untracked content\n");
+    git(dir.path(), &["add", "PKGBUILD"]);
+    let foreign_index = dir.path().join("foreign.index");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .env("GIT_INDEX_FILE", &foreign_index)
+        .args(["add", "PKGBUILD", "private.patch"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let previous = std::env::var_os("GIT_INDEX_FILE");
+    std::env::set_var("GIT_INDEX_FILE", &foreign_index);
+    let result = DefaultRecipeBundleBuilder.build(dir.path(), "demo", generous_limits());
+    if let Some(previous) = previous {
+        std::env::set_var("GIT_INDEX_FILE", previous);
+    } else {
+        std::env::remove_var("GIT_INDEX_FILE");
+    }
+    let bundle = result.unwrap();
+    assert_eq!(
+        bundle
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["PKGBUILD"]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn repository_fsmonitor_is_never_executed() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let _git_environment = init_git(dir.path());
+    write(dir.path(), "PKGBUILD", b"pkgname=demo\n");
+    git(dir.path(), &["add", "PKGBUILD"]);
+    let sentinel = dir.path().join("fsmonitor-ran");
+    let monitor = dir.path().join("monitor.sh");
+    fs::write(
+        &monitor,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf '\\\\n'\n",
+            sentinel.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        dir.path(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let _bundle = DefaultRecipeBundleBuilder
+        .build(dir.path(), "demo", generous_limits())
+        .unwrap();
+    assert!(
+        !sentinel.exists(),
+        "repository-controlled fsmonitor executed"
+    );
+}
+
+#[test]
+fn non_git_discovery_rejects_unbounded_irrelevant_entries() {
+    let dir = TempDir::new().unwrap();
+    write(dir.path(), "PKGBUILD", b"x");
+    for index in 0..4096 {
+        write(dir.path(), &format!("downloaded-{index}.ignored"), b"");
+    }
+    let error = DefaultRecipeBundleBuilder
+        .build(dir.path(), "demo", generous_limits())
+        .unwrap_err();
+    assert!(error.to_string().contains("discovery"));
 }
 
 #[test]
