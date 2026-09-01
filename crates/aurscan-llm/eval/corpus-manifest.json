@@ -29,7 +29,7 @@
       "expected_kinds": ["persistence_privilege", "build_install_boundary"],
       "allowed_evidence": [
         {"file": "PKGBUILD", "start_line_min": 5, "end_line_max": 8},
-        {"file": "persist.install", "start_line_min": 2, "end_line_max": 3}
+        {"file": "persist.install", "start_line_min": 1, "end_line_max": 3}
       ],
       "notes": "The install hook and its post-install behavior must be read together to identify persistence intent."
     },
