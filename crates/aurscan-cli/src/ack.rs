@@ -40,31 +40,36 @@ impl AckStore {
     /// full versioned archive path. Un-normalized, every upgrade un-acked
     /// everything, so the same four browser advisories re-prompted forever.
     pub fn key(f: &Finding) -> String {
-        let h = blake3::hash(
-            format!(
-                "{}|{}",
-                stable_location(&f.evidence.location),
-                f.evidence.excerpt
-            )
-            .as_bytes(),
-        );
-        format!(
-            "{}:{}:{}",
-            stable_package(&f.package),
-            f.detector.0,
-            &h.to_hex()[..16]
-        )
+        let is_llm = matches!(&f.confidence, aurscan_core::Confidence::Llm);
+        let location = if is_llm {
+            stable_llm_location(&f.evidence.location)
+        } else {
+            stable_location(&f.evidence.location)
+        };
+        let package = if is_llm {
+            f.package.clone()
+        } else {
+            stable_package(&f.package)
+        };
+        let h = blake3::hash(format!("{}|{}", location, f.evidence.excerpt).as_bytes());
+        format!("{}:{}:{}", package, f.detector.0, &h.to_hex()[..16])
     }
 
     pub fn is_acked(&self, f: &Finding) -> bool {
         self.acked.contains(&Self::key(f))
     }
 
+    /// Record and persist a reviewed batch with one acknowledgement-file write.
+    pub fn add_batch_and_persist(&mut self, findings: &[&Finding]) -> anyhow::Result<()> {
+        self.acked
+            .extend(findings.iter().map(|finding| Self::key(finding)));
+        self.persist()
+    }
+
     /// Record and persist an acknowledgement for a finding.
     #[cfg(test)]
     pub fn add(&mut self, f: &Finding) -> anyhow::Result<()> {
-        self.acked.insert(Self::key(f));
-        self.persist()
+        self.add_batch_and_persist(&[f])
     }
 
     fn path() -> Option<PathBuf> {
@@ -97,6 +102,23 @@ impl AckStore {
 /// line number (they shift between releases while the excerpt pins the
 /// content) and keeps only the file's basename (clone/cache prefixes vary
 /// by invocation).
+fn stable_llm_location(location: &str) -> String {
+    match location.rsplit_once(':') {
+        Some((path, suffix)) if is_line_or_range(suffix) => path.to_string(),
+        _ => location.to_string(),
+    }
+}
+
+fn is_line_or_range(suffix: &str) -> bool {
+    let mut bounds = suffix.split('-');
+    let valid = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    match (bounds.next(), bounds.next(), bounds.next()) {
+        (Some(line), None, None) => valid(line),
+        (Some(start), Some(end), None) => valid(start) && valid(end),
+        _ => false,
+    }
+}
+
 fn stable_location(location: &str) -> String {
     if let Some((_, member)) = location.rsplit_once('!') {
         return member.to_string();
@@ -203,7 +225,10 @@ pub fn run_ack(targets: &[String], yes: bool, cfg: &crate::config::Config) -> i3
                 }
             }
             if !found {
-                eprintln!("aurscan: nothing found to acknowledge for `{t}`");
+                eprintln!(
+                    "aurscan: nothing found to acknowledge for `{}`",
+                    crate::report::terminal_safe(t)
+                );
             }
         }
     }
@@ -241,8 +266,16 @@ pub fn run_ack(targets: &[String], yes: bool, cfg: &crate::config::Config) -> i3
     }
 
     for f in &pending {
-        println!("{}: [{:?}] {}", f.package, f.severity, f.reason);
-        println!("    \u{21b3} {}", f.evidence.location);
+        println!(
+            "{}: [{:?}] {}",
+            crate::report::terminal_safe(&f.package),
+            f.severity,
+            crate::report::terminal_safe(&f.reason)
+        );
+        println!(
+            "    \u{21b3} {}",
+            crate::report::terminal_safe(&f.evidence.location)
+        );
     }
     if !yes {
         if !std::io::stdin().is_terminal() {
@@ -264,17 +297,108 @@ pub fn run_ack(targets: &[String], yes: bool, cfg: &crate::config::Config) -> i3
         }
     }
 
-    let keys: Vec<String> = pending.iter().map(|f| AckStore::key(f)).collect();
-    let count = keys.len();
-    for key in keys {
-        store.acked.insert(key);
-    }
-    if let Err(e) = store.persist() {
+    let count = pending.len();
+    if let Err(e) = store.add_batch_and_persist(&pending) {
         eprintln!("error: could not persist acknowledgements: {e:#}");
         return 3;
     }
     println!("aurscan: acknowledged {count} finding(s)");
     0
+}
+
+pub(crate) fn run_llm_ack(
+    targets: &[String],
+    yes: bool,
+    cfg: &crate::config::Config,
+    llm: &aurscan_llm::ValidatedLlmConfig,
+) -> i32 {
+    use std::io::IsTerminal;
+
+    let collection = match crate::deep_scan::collect(targets, false, cfg, llm) {
+        Ok(collection) => collection,
+        Err(error) => {
+            eprintln!(
+                "error: {}",
+                crate::report::terminal_safe(&format!("{error:#}"))
+            );
+            return 3;
+        }
+    };
+    let mut store = AckStore::load();
+    let pending = match pending_llm_findings(&collection.run, &store) {
+        Ok(pending) => pending,
+        Err(error) => {
+            eprintln!("aurscan: {error}; no LLM acknowledgements were persisted");
+            return 3;
+        }
+    };
+    if pending.is_empty() {
+        println!("aurscan: nothing to acknowledge (no unacked LLM findings at Medium or above)");
+        return 0;
+    }
+
+    for finding in &pending {
+        println!(
+            "{}: [{:?}] [LLM; Advisory ceiling] {}",
+            crate::report::terminal_safe(&finding.package),
+            finding.severity,
+            crate::report::terminal_safe(&finding.reason),
+        );
+        println!(
+            "    \u{21b3} {}",
+            crate::report::terminal_safe(&finding.evidence.location)
+        );
+    }
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            eprintln!("aurscan: not a terminal; rerun with --yes to acknowledge");
+            return 1;
+        }
+        print!(
+            "Acknowledge {} finding(s)? They stop prompting and gating until \
+             their matched content changes. [y/N] ",
+            pending.len()
+        );
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let mut line = String::new();
+        let ok = std::io::stdin().read_line(&mut line).is_ok()
+            && matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+        if !ok {
+            println!("aurscan: nothing acknowledged");
+            return 1;
+        }
+    }
+
+    let count = pending.len();
+    if let Err(error) = store.add_batch_and_persist(&pending) {
+        eprintln!("error: could not persist acknowledgements: {error:#}");
+        return 3;
+    }
+    println!("aurscan: acknowledged {count} LLM finding(s)");
+    0
+}
+
+fn pending_llm_findings<'a>(
+    run: &'a crate::deep_scan::DeepRun,
+    store: &AckStore,
+) -> anyhow::Result<Vec<&'a Finding>> {
+    if run
+        .packages
+        .iter()
+        .any(|package| package.analysis.status != aurscan_llm::AnalysisStatus::Completed)
+    {
+        anyhow::bail!("one or more requested LLM analyses did not complete");
+    }
+    Ok(run
+        .packages
+        .iter()
+        .flat_map(|package| package.combined.findings.iter())
+        .filter(|finding| {
+            matches!(&finding.confidence, aurscan_core::Confidence::Llm)
+                && finding.severity >= aurscan_core::Severity::Medium
+                && !store.is_acked(finding)
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -395,5 +519,141 @@ mod tests {
 
         let reloaded = AckStore::load();
         assert!(reloaded.is_acked(&f));
+    }
+
+    fn llm_finding(loc: &str, excerpt: &str) -> Finding {
+        let mut finding = finding("canonical-base", "llm_download_execute", loc, excerpt);
+        finding.confidence = Confidence::Llm;
+        finding
+    }
+
+    #[test]
+    fn deterministic_key_bytes_remain_on_the_legacy_normalization_path() {
+        let f = finding(
+            "zen-browser-bin-1.22.0-1-x86_64",
+            "elf_inspect",
+            "/cache/archive.pkg.tar.zst!opt/zen/pingsender",
+            "dynamic import combo",
+        );
+        let hash = blake3::hash(
+            format!(
+                "{}|{}",
+                stable_location(&f.evidence.location),
+                f.evidence.excerpt
+            )
+            .as_bytes(),
+        );
+        let legacy = format!(
+            "{}:{}:{}",
+            stable_package(&f.package),
+            f.detector.0,
+            &hash.to_hex()[..16]
+        );
+        assert_eq!(AckStore::key(&f), legacy);
+    }
+
+    #[test]
+    fn llm_keys_keep_full_relative_paths_but_ignore_line_movement() {
+        let first = llm_finding("helpers/one/install.sh:3", "curl x | sh");
+        let moved = llm_finding("helpers/one/install.sh:19-21", "curl x | sh");
+        let same_name_elsewhere = llm_finding("helpers/two/install.sh:3", "curl x | sh");
+
+        assert_eq!(AckStore::key(&first), AckStore::key(&moved));
+        assert_ne!(AckStore::key(&first), AckStore::key(&same_name_elsewhere));
+    }
+
+    #[test]
+    fn llm_keys_keep_the_exact_canonical_pkgbase_component() {
+        let canonical = llm_finding("PKGBUILD:4", "download payload");
+        let mut archive_shaped = canonical.clone();
+        archive_shaped.package = "canonical-base-1-1-x86_64".into();
+        assert_ne!(AckStore::key(&canonical), AckStore::key(&archive_shaped));
+    }
+
+    #[test]
+    fn llm_keys_invalidate_when_relative_path_or_evidence_changes() {
+        let original = llm_finding("scripts/prepare.sh:4", "download payload");
+        let moved_file = llm_finding("scripts/build.sh:4", "download payload");
+        let changed_evidence = llm_finding("scripts/prepare.sh:4", "download other payload");
+
+        assert_ne!(AckStore::key(&original), AckStore::key(&moved_file));
+        assert_ne!(AckStore::key(&original), AckStore::key(&changed_evidence));
+    }
+
+    #[test]
+    fn llm_ack_selection_refuses_incomplete_analysis_before_returning_findings() {
+        use crate::deep_scan::{DeepPackageReport, DeepRun};
+        use aurscan_core::{PackageReport, Verdict};
+        use aurscan_llm::{AnalysisOutcome, AnalysisStatus, BundleCoverage, CoverageMode};
+        let llm = llm_finding("PKGBUILD:3", "suspicious command");
+        let run = DeepRun {
+            packages: vec![DeepPackageReport {
+                pkgbase: "base".into(),
+                requested_packages: vec!["base".into()],
+                combined: PackageReport {
+                    package: "base".into(),
+                    verdict: Verdict::Advisory(vec![]),
+                    findings: vec![llm],
+                    features: vec![],
+                },
+                analysis: AnalysisOutcome {
+                    status: AnalysisStatus::Incomplete,
+                    source: None,
+                    findings: vec![],
+                    identity: None,
+                    usage: None,
+                    reason: Some("truncated".into()),
+                },
+                coverage: BundleCoverage {
+                    mode: CoverageMode::GitTracked,
+                    included_files: 1,
+                    excluded_binary_files: vec![],
+                    excluded_symlinks: vec![],
+                },
+            }],
+            exit_code: 3,
+        };
+        assert!(pending_llm_findings(&run, &AckStore::from_keys([])).is_err());
+    }
+
+    #[test]
+    fn llm_ack_selection_includes_only_live_medium_or_higher_llm_findings() {
+        use crate::deep_scan::{DeepPackageReport, DeepRun};
+        use aurscan_core::{PackageReport, Verdict};
+        use aurscan_llm::{AnalysisOutcome, AnalysisStatus, BundleCoverage, CoverageMode};
+        let selected = llm_finding("PKGBUILD:3", "selected");
+        let mut info = llm_finding("PKGBUILD:4", "info");
+        info.severity = Severity::Info;
+        let deterministic = finding("base", "static", "PKGBUILD:5", "deterministic");
+        let run = DeepRun {
+            packages: vec![DeepPackageReport {
+                pkgbase: "base".into(),
+                requested_packages: vec!["base".into()],
+                combined: PackageReport {
+                    package: "base".into(),
+                    verdict: Verdict::Advisory(vec![]),
+                    findings: vec![selected.clone(), info, deterministic],
+                    features: vec![],
+                },
+                analysis: AnalysisOutcome {
+                    status: AnalysisStatus::Completed,
+                    source: None,
+                    findings: vec![],
+                    identity: None,
+                    usage: None,
+                    reason: None,
+                },
+                coverage: BundleCoverage {
+                    mode: CoverageMode::GitTracked,
+                    included_files: 1,
+                    excluded_binary_files: vec![],
+                    excluded_symlinks: vec![],
+                },
+            }],
+            exit_code: 1,
+        };
+        let pending = pending_llm_findings(&run, &AckStore::from_keys([])).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].evidence.excerpt, selected.evidence.excerpt);
     }
 }

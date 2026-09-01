@@ -16,6 +16,28 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[derive(Debug)]
+pub(crate) struct ScannedAurPackage {
+    pub info: AurInfo,
+    pub checkout: Option<PathBuf>,
+    pub reports: Vec<PackageReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchPlan {
+    SkipWithoutCheckout,
+    EnsureCheckoutAndSkipSources,
+    FullScan,
+}
+
+fn fetch_plan(clean_at_remote_head: bool, require_checkout: bool) -> FetchPlan {
+    match (clean_at_remote_head, require_checkout) {
+        (true, false) => FetchPlan::SkipWithoutCheckout,
+        (true, true) => FetchPlan::EnsureCheckoutAndSkipSources,
+        (false, _) => FetchPlan::FullScan,
+    }
+}
+
 /// Scan an already-cloned pkgbase directory: its build scripts, then any
 /// already-materialized `source_files` (from `fetch::verifysource`). Pure
 /// aside from reading `dir`/`source_files` off disk -- no git, makepkg, or
@@ -59,7 +81,11 @@ pub fn scan_dir_pipeline(
 /// `makepkg --verifysource` are where a repeat scan's network and
 /// wall-clock cost live; the redb result cache cannot help there because
 /// you must *have* the content to hash it.
-fn fetch_and_scan(info: &AurInfo, cfg: &Config) -> anyhow::Result<Vec<PackageReport>> {
+pub(crate) fn fetch_and_scan(
+    info: &AurInfo,
+    cfg: &Config,
+    require_checkout: bool,
+) -> anyhow::Result<ScannedAurPackage> {
     let mut ledger = crate::commit_ledger::CommitLedger::load();
     let (ruleset_version, detector_epoch) = registry::cache_identity();
 
@@ -68,47 +94,84 @@ fn fetch_and_scan(info: &AurInfo, cfg: &Config) -> anyhow::Result<Vec<PackageRep
     } else {
         fetch::remote_head(&info.package_base).ok()
     };
-    if let Some(head) = &remote_head {
-        if ledger.clean_at(&info.package_base, head, ruleset_version, detector_epoch) {
-            eprintln!(
-                "==> aurscan: {} unchanged since its last clean scan ({}), fetch skipped",
-                info.name,
-                &head[..7.min(head.len())]
-            );
-            return Ok(vec![PackageReport {
-                package: info.name.clone(),
-                verdict: aurscan_core::Verdict::Clean,
-                findings: Vec::new(),
-                features: Vec::new(),
-            }]);
-        }
-    }
+    let clean_at_remote_head = remote_head.as_ref().is_some_and(|head| {
+        ledger.clean_at(&info.package_base, head, ruleset_version, detector_epoch)
+    });
+    let plan = fetch_plan(clean_at_remote_head, require_checkout);
 
-    let dir = fetch::sync_pkgbase(&info.package_base)?;
-    let source_files = fetch::verifysource(&dir)?;
-    let reports = scan_dir_pipeline(
-        &dir,
-        &info.name,
-        &info.version,
-        Some(info.to_metadata()),
-        &source_files,
-        cfg,
-    )?;
-
-    // Record *after* scanning, with the verdict: the pre-ledger version of
-    // this wrote the commit before the scan ran, so it could never say
-    // whether the commit was safe to skip.
-    if let Ok(commit) = fetch::head_commit(&dir) {
-        ledger.record(
-            &info.package_base,
-            crate::commit_ledger::Entry {
-                commit,
-                verdict: worst_verdict_label(&reports).to_string(),
-                ruleset_version,
-                detector_epoch,
-            },
+    if clean_at_remote_head {
+        let head = remote_head.as_deref().expect("clean remote head exists");
+        eprintln!(
+            "==> aurscan: {} unchanged since its last clean scan ({}), fetch skipped",
+            report::terminal_safe(&info.name),
+            &head[..7.min(head.len())]
         );
     }
+
+    let clean_reports = || {
+        vec![PackageReport {
+            package: info.name.clone(),
+            verdict: aurscan_core::Verdict::Clean,
+            findings: Vec::new(),
+            features: Vec::new(),
+        }]
+    };
+    match plan {
+        FetchPlan::SkipWithoutCheckout => Ok(ScannedAurPackage {
+            info: info.clone(),
+            checkout: None,
+            reports: clean_reports(),
+        }),
+        FetchPlan::EnsureCheckoutAndSkipSources => {
+            let dir = fetch::sync_pkgbase(&info.package_base)?;
+            Ok(ScannedAurPackage {
+                info: info.clone(),
+                checkout: Some(dir),
+                reports: clean_reports(),
+            })
+        }
+        FetchPlan::FullScan => {
+            let dir = fetch::sync_pkgbase(&info.package_base)?;
+            let source_files = fetch::verifysource(&dir)?;
+            let scan_result = scan_dir_pipeline(
+                &dir,
+                &info.name,
+                &info.version,
+                Some(info.to_metadata()),
+                &source_files,
+                cfg,
+            );
+            let reports = after_completed_scan(scan_result, |reports| {
+                // Record *after* scanning, with the verdict: the pre-ledger
+                // version of this wrote the commit before the scan ran, so it
+                // could never say whether the commit was safe to skip.
+                if let Ok(commit) = fetch::head_commit(&dir) {
+                    ledger.record(
+                        &info.package_base,
+                        crate::commit_ledger::Entry {
+                            commit,
+                            verdict: worst_verdict_label(reports).to_string(),
+                            ruleset_version,
+                            detector_epoch,
+                        },
+                    );
+                }
+            })?;
+            Ok(ScannedAurPackage {
+                info: info.clone(),
+                checkout: Some(dir),
+                reports,
+            })
+        }
+    }
+}
+
+fn after_completed_scan(
+    scan_result: anyhow::Result<Vec<PackageReport>>,
+    record: impl FnOnce(&[PackageReport]),
+) -> anyhow::Result<Vec<PackageReport>> {
+    let reports = scan_result?;
+    record(&reports);
     Ok(reports)
 }
 
@@ -140,9 +203,12 @@ pub fn run_check_names(
 
     let mut reports = Vec::new();
     for info in &infos {
-        match fetch_and_scan(info, cfg) {
-            Ok(r) => reports.extend(r),
-            Err(e) => eprintln!("warning: {} could not be fetched/scanned: {e:#}", info.name),
+        match fetch_and_scan(info, cfg, false) {
+            Ok(scanned) => reports.extend(scanned.reports),
+            Err(e) => eprintln!(
+                "warning: {} could not be fetched/scanned: {e:#}",
+                report::terminal_safe(&info.name)
+            ),
         }
     }
 
@@ -171,10 +237,13 @@ pub fn run_install(
 
     let mut reports = Vec::new();
     for info in &infos {
-        match fetch_and_scan(info, cfg) {
-            Ok(r) => reports.extend(r),
+        match fetch_and_scan(info, cfg, false) {
+            Ok(scanned) => reports.extend(scanned.reports),
             Err(e) => {
-                eprintln!("error: {} could not be fetched/scanned: {e:#}", info.name);
+                eprintln!(
+                    "error: {} could not be fetched/scanned: {e:#}",
+                    report::terminal_safe(&info.name)
+                );
                 return 3;
             }
         }
@@ -287,5 +356,36 @@ mod tests {
 
         assert_eq!(reports.len(), 1);
         assert!(matches!(reports[0].verdict, Verdict::Clean));
+    }
+
+    #[test]
+    fn fetch_plan_covers_clean_ledger_and_checkout_requirements() {
+        let cases = [
+            (true, false, FetchPlan::SkipWithoutCheckout),
+            (true, true, FetchPlan::EnsureCheckoutAndSkipSources),
+            (false, false, FetchPlan::FullScan),
+            (false, true, FetchPlan::FullScan),
+        ];
+        for (clean, require_checkout, expected) in cases {
+            assert_eq!(fetch_plan(clean, require_checkout), expected);
+        }
+    }
+
+    #[test]
+    fn ledger_recording_happens_only_after_a_completed_scan() {
+        let mut recorded = 0;
+        let failed: anyhow::Result<Vec<PackageReport>> = Err(anyhow::anyhow!("scan failed"));
+        assert!(after_completed_scan(failed, |_| recorded += 1).is_err());
+        assert_eq!(recorded, 0);
+
+        let completed = vec![PackageReport {
+            package: "p".into(),
+            verdict: Verdict::Clean,
+            findings: vec![],
+            features: vec![],
+        }];
+        let reports = after_completed_scan(Ok(completed), |_| recorded += 1).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(recorded, 1);
     }
 }

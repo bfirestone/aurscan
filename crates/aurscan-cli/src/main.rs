@@ -6,6 +6,7 @@ mod cli;
 mod commit_ledger;
 mod config;
 mod corpus;
+mod deep_scan;
 mod fetch;
 mod flow;
 mod gate;
@@ -22,7 +23,17 @@ use std::io::IsTerminal;
 
 fn main() {
     let cli = Cli::parse();
-    let cfg = Config::load();
+    let (cfg, llm_config) = if requires_strict_llm(&cli.cmd) {
+        match Config::load_strict_llm() {
+            Ok(strict) => (strict.config, Some(strict.llm)),
+            Err(error) => {
+                eprintln!("error: {}", report::terminal_safe(&format!("{error:#}")));
+                std::process::exit(3);
+            }
+        }
+    } else {
+        (Config::load(), None)
+    };
 
     // Size the rayon pool before anything scans (build_global is
     // first-caller-wins). Hooks run behind an interactive pacman/paru
@@ -63,6 +74,17 @@ fn main() {
                 code
             }
         }
+        Cmd::DeepScan { targets, refresh } => deep_scan::run_deep_scan(
+            &targets,
+            refresh,
+            &cfg,
+            llm_config
+                .as_ref()
+                .expect("strict LLM config loaded for deep-scan"),
+            cli.json,
+            cli.no_color,
+            cli.verbose,
+        ),
         Cmd::Install { packages, allow } => {
             let refs: Vec<&str> = packages.iter().map(String::as_str).collect();
             flow::run_install(&refs, &allow, &cfg, cli.json, cli.no_color, cli.verbose)
@@ -75,12 +97,21 @@ fn main() {
                 artifact::scan_files(&paths, &cfg, cli.json, cli.no_color, cli.verbose)
             }
         }
-        Cmd::Ack { targets, yes } => {
+        Cmd::Ack { targets, llm, yes } => {
             if targets.is_empty() {
                 eprintln!(
                     "aurscan: name at least one package, build dir, or archive to acknowledge"
                 );
                 3
+            } else if llm {
+                ack::run_llm_ack(
+                    &targets,
+                    yes,
+                    &cfg,
+                    llm_config
+                        .as_ref()
+                        .expect("strict LLM config loaded for ack --llm"),
+                )
             } else {
                 ack::run_ack(&targets, yes, &cfg)
             }
@@ -111,6 +142,10 @@ fn main() {
     std::process::exit(code);
 }
 
+fn requires_strict_llm(command: &Cmd) -> bool {
+    matches!(command, Cmd::DeepScan { .. } | Cmd::Ack { llm: true, .. })
+}
+
 fn run_check(paths: &[String], cfg: &Config, json: bool, no_color: bool, verbose: bool) -> i32 {
     let (reports, code) = match registry::run_check(paths, cfg) {
         Ok(result) => result,
@@ -136,4 +171,51 @@ fn run_check(paths: &[String], cfg: &Config, json: bool, no_color: bool, verbose
     }
 
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_llm_loading_is_isolated_to_the_two_explicit_surfaces() {
+        let deep = Cmd::DeepScan {
+            targets: vec![],
+            refresh: false,
+        };
+        let llm_ack = Cmd::Ack {
+            targets: vec![],
+            llm: true,
+            yes: false,
+        };
+        assert!(requires_strict_llm(&deep));
+        assert!(requires_strict_llm(&llm_ack));
+
+        let ordinary = [
+            Cmd::Check {
+                targets: vec![],
+                hook: false,
+            },
+            Cmd::Install {
+                packages: vec![],
+                allow: vec![],
+            },
+            Cmd::ScanArtifact {
+                packages: vec![],
+                hook: false,
+            },
+            Cmd::Ack {
+                targets: vec![],
+                llm: false,
+                yes: false,
+            },
+            Cmd::Audit { root: "/".into() },
+            Cmd::UpdateLists,
+            Cmd::Setup {
+                yes: false,
+                check: true,
+            },
+        ];
+        assert!(ordinary.iter().all(|command| !requires_strict_llm(command)));
+    }
 }

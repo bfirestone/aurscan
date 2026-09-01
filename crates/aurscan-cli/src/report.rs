@@ -6,6 +6,35 @@ use crate::ack::AckStore;
 use aurscan_core::{Finding, PackageReport, Severity, Verdict};
 use std::fmt::Write;
 
+/// Escape terminal controls and Unicode format controls as visible codepoint
+/// notation. JSON rendering intentionally keeps the underlying structured
+/// strings unchanged and relies on normal JSON escaping.
+pub(crate) fn terminal_safe(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if is_non_printing(character) {
+            let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+fn is_non_printing(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{00ad}'
+                | '\u{061c}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+        )
+}
+
 /// Human-readable, severity-sorted report. `Info` findings ride along only when
 /// `verbose`; acknowledged findings are suppressed and summarized instead.
 pub fn render_text(
@@ -16,7 +45,12 @@ pub fn render_text(
 ) -> String {
     let mut out = String::new();
     for report in reports {
-        let _ = writeln!(out, "{}: {}", report.package, verdict_name(&report.verdict));
+        let _ = writeln!(
+            out,
+            "{}: {}",
+            terminal_safe(&report.package),
+            verdict_name(&report.verdict)
+        );
 
         let mut findings: Vec<&Finding> = report.findings.iter().collect();
         findings.sort_by_key(|f| std::cmp::Reverse(f.severity));
@@ -31,10 +65,15 @@ pub fn render_text(
                 continue;
             }
             let marker = severity_marker(f.severity, color);
-            let _ = writeln!(out, "  {marker} {}", f.reason);
-            let _ = writeln!(out, "    \u{21b3} {}", f.evidence.location);
+            let provenance = if matches!(&f.confidence, aurscan_core::Confidence::Llm) {
+                " [LLM; ADVISORY CEILING]"
+            } else {
+                ""
+            };
+            let _ = writeln!(out, "  {marker}{provenance} {}", terminal_safe(&f.reason));
+            let _ = writeln!(out, "    \u{21b3} {}", terminal_safe(&f.evidence.location));
             for line in excerpt_lines(f) {
-                let _ = writeln!(out, "      \u{2502} {line}");
+                let _ = writeln!(out, "      \u{2502} {}", terminal_safe(&line));
             }
         }
         if acknowledged > 0 {
@@ -53,13 +92,22 @@ const MAX_EXCERPT_LINES: usize = 4;
 /// like `archive_layout` put the member path in both the reason and the
 /// excerpt, and repeating it is noise.
 fn excerpt_lines(f: &Finding) -> Vec<String> {
-    let excerpt = f.evidence.excerpt.trim();
+    let excerpt = &f.evidence.excerpt;
     if excerpt.is_empty() || f.reason.contains(excerpt) {
         return Vec::new();
     }
     let mut lines: Vec<String> = excerpt
-        .lines()
-        .map(|l| l.trim_end().to_string())
+        .split_inclusive('\n')
+        .map(|chunk| {
+            let (content, had_newline) = chunk
+                .strip_suffix('\n')
+                .map_or((chunk, false), |content| (content, true));
+            let mut display = content.trim_end_matches([' ', '\t']).to_string();
+            if had_newline {
+                display.push('\n');
+            }
+            display
+        })
         .take(MAX_EXCERPT_LINES + 1)
         .collect();
     if lines.len() > MAX_EXCERPT_LINES {
@@ -100,6 +148,243 @@ pub fn render_json(reports: &[PackageReport]) -> serde_json::Value {
         "reports": entries,
         "summary": { "clean": clean, "advisory": advisory, "block": block },
     })
+}
+
+/// Structured deep-scan view. Existing command JSON continues to use
+/// `render_json`; this schema is exclusive to the explicit LLM command.
+pub(crate) fn render_deep_json(
+    run: &crate::deep_scan::DeepRun,
+    preflight: &crate::deep_scan::DeepPreflight,
+) -> serde_json::Value {
+    use aurscan_llm::{AnalysisSource, AnalysisStatus};
+
+    let (mut clean, mut advisory, mut block) = (0u32, 0u32, 0u32);
+    let (mut completed, mut cache_hit, mut unavailable, mut incomplete) = (0u32, 0u32, 0u32, 0u32);
+    let packages: Vec<serde_json::Value> = run
+        .packages
+        .iter()
+        .map(|package| {
+            let verdict = match package.combined.verdict {
+                Verdict::Clean => {
+                    clean += 1;
+                    "clean"
+                }
+                Verdict::Advisory(_) => {
+                    advisory += 1;
+                    "advisory"
+                }
+                Verdict::Block(_) => {
+                    block += 1;
+                    "block"
+                }
+            };
+            match package.analysis.status {
+                AnalysisStatus::Completed => completed += 1,
+                AnalysisStatus::Unavailable => unavailable += 1,
+                AnalysisStatus::Incomplete => incomplete += 1,
+            }
+            if package.analysis.source == Some(AnalysisSource::Cache) {
+                cache_hit += 1;
+            }
+
+            let identity = package.analysis.identity.as_ref();
+            let mut analysis = serde_json::Map::new();
+            analysis.insert(
+                "status".into(),
+                serde_json::to_value(package.analysis.status).unwrap(),
+            );
+            if let Some(source) = package.analysis.source {
+                analysis.insert("source".into(), serde_json::to_value(source).unwrap());
+            }
+            analysis.insert(
+                "model".into(),
+                serde_json::Value::String(
+                    identity
+                        .map(|identity| identity.model_id.clone())
+                        .unwrap_or_else(|| preflight.model.clone()),
+                ),
+            );
+            analysis.insert(
+                "review_strategy_id".into(),
+                serde_json::Value::String(
+                    identity
+                        .map(|identity| identity.review_strategy_id.clone())
+                        .unwrap_or_else(|| aurscan_llm::REVIEW_STRATEGY_ID.to_string()),
+                ),
+            );
+            analysis.insert(
+                "prompt_version".into(),
+                serde_json::json!(identity
+                    .map(|identity| identity.prompt_version)
+                    .unwrap_or(aurscan_llm::PROMPT_VERSION)),
+            );
+            if let Some(identity) = identity {
+                analysis.insert(
+                    "bundle_hash".into(),
+                    serde_json::Value::String(hex_bytes(&identity.bundle_hash)),
+                );
+            }
+            analysis.insert(
+                "coverage".into(),
+                serde_json::to_value(&package.coverage).unwrap(),
+            );
+            if let Some(usage) = package.analysis.usage {
+                analysis.insert("usage".into(), serde_json::to_value(usage).unwrap());
+            }
+            analysis.insert(
+                "reason".into(),
+                package
+                    .analysis
+                    .reason
+                    .as_ref()
+                    .map_or(serde_json::Value::Null, |reason| {
+                        serde_json::Value::String(reason.clone())
+                    }),
+            );
+
+            serde_json::json!({
+                "pkgbase": package.pkgbase,
+                "requested_packages": package.requested_packages,
+                "verdict": verdict,
+                "findings": package.combined.findings,
+                "analysis": analysis,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "packages": packages,
+        "preflight": {
+            "endpoint_host": preflight.endpoint_host,
+            "model": preflight.model,
+            "review_strategy_id": aurscan_llm::REVIEW_STRATEGY_ID,
+            "package_count": preflight.package_count,
+            "original_bytes": preflight.original_bytes,
+            "encoded_request_bytes": preflight.encoded_request_bytes,
+            "large_request_mode": preflight.large_request_mode,
+        },
+        "summary": {
+            "clean": clean,
+            "advisory": advisory,
+            "block": block,
+            "completed": completed,
+            "cache_hit": cache_hit,
+            "unavailable": unavailable,
+            "incomplete": incomplete,
+        },
+        "exit_code": run.exit_code,
+    })
+}
+
+pub(crate) fn render_deep_text(
+    run: &crate::deep_scan::DeepRun,
+    preflight: &crate::deep_scan::DeepPreflight,
+    acks: &AckStore,
+    verbose: bool,
+    color: bool,
+) -> String {
+    use aurscan_llm::{AnalysisSource, AnalysisStatus, CoverageMode};
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "LLM preflight: host={}, model={}, strategy={}, prompt version={}, packages={}, original bytes={}, encoded bytes={}, large mode={}",
+        terminal_safe(&preflight.endpoint_host),
+        terminal_safe(&preflight.model),
+        aurscan_llm::REVIEW_STRATEGY_ID,
+        aurscan_llm::PROMPT_VERSION,
+        preflight.package_count,
+        preflight.original_bytes,
+        preflight.encoded_request_bytes,
+        preflight.large_request_mode,
+    );
+    for package in &run.packages {
+        out.push_str(&render_text(
+            std::slice::from_ref(&package.combined),
+            acks,
+            verbose,
+            color,
+        ));
+        let requested = package
+            .requested_packages
+            .iter()
+            .map(|name| terminal_safe(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let status = match package.analysis.status {
+            AnalysisStatus::Completed => "completed",
+            AnalysisStatus::Unavailable => "unavailable",
+            AnalysisStatus::Incomplete => "incomplete",
+        };
+        let source = match package.analysis.source {
+            Some(AnalysisSource::Provider) => "provider",
+            Some(AnalysisSource::Cache) => "cache",
+            None => "no source",
+        };
+        let _ = writeln!(
+            out,
+            "  LLM provenance: {status} via {source}; experimental, Advisory ceiling; no model-issued clearance"
+        );
+        let _ = writeln!(out, "  requested/resolved packages: {requested}");
+        if package.analysis.findings.is_empty() {
+            let _ = writeln!(out, "  no accepted LLM findings");
+        } else {
+            let _ = writeln!(
+                out,
+                "  accepted LLM findings: {}",
+                package.analysis.findings.len()
+            );
+        }
+        let coverage_mode = match package.coverage.mode {
+            CoverageMode::GitTracked => "git_tracked",
+            CoverageMode::ConservativeLocal => "conservative_local",
+        };
+        let _ = writeln!(
+            out,
+            "  coverage: mode={coverage_mode}, included files={}, excluded binaries={}, excluded symlinks={}",
+            package.coverage.included_files,
+            package.coverage.excluded_binary_files.len(),
+            package.coverage.excluded_symlinks.len(),
+        );
+        for path in &package.coverage.excluded_binary_files {
+            let _ = writeln!(out, "    excluded binary: {}", terminal_safe(path));
+        }
+        for path in &package.coverage.excluded_symlinks {
+            let _ = writeln!(out, "    excluded symlink: {}", terminal_safe(path));
+        }
+        if let Some(reason) = &package.analysis.reason {
+            let _ = writeln!(out, "  analysis reason: {}", terminal_safe(reason));
+        }
+    }
+    let completed = run
+        .packages
+        .iter()
+        .filter(|package| package.analysis.status == AnalysisStatus::Completed)
+        .count();
+    let cache_hits = run
+        .packages
+        .iter()
+        .filter(|package| package.analysis.source == Some(AnalysisSource::Cache))
+        .count();
+    let unavailable = run
+        .packages
+        .iter()
+        .filter(|package| package.analysis.status == AnalysisStatus::Unavailable)
+        .count();
+    let incomplete = run
+        .packages
+        .iter()
+        .filter(|package| package.analysis.status == AnalysisStatus::Incomplete)
+        .count();
+    let _ = writeln!(
+        out,
+        "LLM summary: completed={completed}, cache-hit={cache_hits}, unavailable={unavailable}, incomplete={incomplete}"
+    );
+    out
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Worst exit code across all reports: `2` Block, `1` Advisory, `0` Clean.
@@ -298,5 +583,195 @@ mod tests {
         assert_eq!(v["summary"]["block"], 1);
         assert_eq!(v["reports"][0]["verdict"], "block");
         assert_eq!(v["reports"][0]["package"], "pkg");
+    }
+
+    #[test]
+    fn evidence_newlines_and_controls_are_visible_not_interpreted_as_terminal_content() {
+        let mut f = finding(
+            Severity::Medium,
+            "suspicious multiline evidence",
+            "first\u{1b}\nsecond\rthird",
+        );
+        f.evidence.location = "PKGBUILD:3".into();
+        let rep = report("pkg", Verdict::Advisory(vec![]), vec![f]);
+        let text = render_text(&[rep], &AckStore::from_keys([]), false, false);
+        assert!(text.contains("first\\u{1b}\\u{a}"), "got:\n{text}");
+        assert!(text.contains("second\\u{d}third"), "got:\n{text}");
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains('\r'));
+
+        let newline_only = finding(Severity::Medium, "newline evidence", "\n");
+        let rep = report("pkg", Verdict::Advisory(vec![]), vec![newline_only]);
+        let text = render_text(&[rep], &AckStore::from_keys([]), false, false);
+        assert!(text.contains("\\u{a}"), "got:\n{text}");
+    }
+
+    #[test]
+    fn terminal_safety_visibly_escapes_controls_and_bidi_without_mutating_json() {
+        let unsafe_text = "pkg\u{1b}\r\u{85}\u{202e}\u{200b}";
+        let escaped = terminal_safe(unsafe_text);
+        assert!(!escaped.contains('\u{1b}'));
+        assert!(!escaped.contains('\r'));
+        assert!(!escaped.contains('\u{85}'));
+        assert!(!escaped.contains('\u{202e}'));
+        assert!(!escaped.contains('\u{200b}'));
+        assert!(escaped.contains("\\u{1b}"));
+        assert!(escaped.contains("\\u{202e}"));
+
+        let mut f = finding(Severity::Medium, unsafe_text, unsafe_text);
+        f.evidence.location = unsafe_text.into();
+        let rep = report(unsafe_text, Verdict::Advisory(vec![]), vec![f]);
+        let text = render_text(
+            std::slice::from_ref(&rep),
+            &AckStore::from_keys([]),
+            false,
+            false,
+        );
+        assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains('\u{202e}'));
+        assert!(text.contains("\\u{1b}"));
+
+        let json = render_json(&[rep]);
+        assert_eq!(json["reports"][0]["package"], unsafe_text);
+        assert_eq!(json["reports"][0]["findings"][0]["reason"], unsafe_text);
+    }
+
+    #[test]
+    fn deep_json_has_analysis_identity_coverage_and_completion_summary() {
+        use crate::deep_scan::{DeepPackageReport, DeepPreflight, DeepRun};
+        use aurscan_llm::{
+            AnalysisIdentity, AnalysisOutcome, AnalysisSource, AnalysisStatus, BundleCoverage,
+            CoverageMode, TokenUsage,
+        };
+
+        fn package(status: AnalysisStatus, source: Option<AnalysisSource>) -> DeepPackageReport {
+            let identity = AnalysisIdentity {
+                bundle_hash: [0xab; 32],
+                provider_protocol_version: 1,
+                endpoint_origin_fingerprint: [1; 32],
+                model_id: "pinned-model".into(),
+                review_strategy_id: "findings_first_v1".into(),
+                request_profile_fingerprint: [2; 32],
+                prompt_version: 1,
+                prompt_hash: [3; 32],
+                response_schema_version: 1,
+                response_schema_hash: [4; 32],
+                analysis_epoch: 1,
+            };
+            DeepPackageReport {
+                pkgbase: format!("base-{status:?}"),
+                requested_packages: vec!["split".into()],
+                combined: report("base", Verdict::Clean, vec![]),
+                analysis: AnalysisOutcome {
+                    status,
+                    source,
+                    findings: vec![],
+                    identity: Some(identity),
+                    usage: (status == AnalysisStatus::Completed).then_some(TokenUsage {
+                        input_tokens: 12,
+                        output_tokens: 3,
+                    }),
+                    reason: (status != AnalysisStatus::Completed).then(|| "offline".into()),
+                },
+                coverage: BundleCoverage {
+                    mode: CoverageMode::GitTracked,
+                    included_files: 2,
+                    excluded_binary_files: vec!["binary.bin".into()],
+                    excluded_symlinks: vec!["link".into()],
+                },
+            }
+        }
+
+        let run = DeepRun {
+            packages: vec![
+                package(AnalysisStatus::Completed, Some(AnalysisSource::Cache)),
+                package(AnalysisStatus::Completed, Some(AnalysisSource::Provider)),
+                package(AnalysisStatus::Unavailable, None),
+                package(AnalysisStatus::Incomplete, Some(AnalysisSource::Provider)),
+            ],
+            exit_code: 3,
+        };
+        let preflight = DeepPreflight {
+            endpoint_host: "localhost".into(),
+            model: "pinned-model".into(),
+            package_count: 4,
+            original_bytes: 100,
+            encoded_request_bytes: 400,
+            large_request_mode: false,
+        };
+        let json = render_deep_json(&run, &preflight);
+
+        assert_eq!(json["packages"][0]["pkgbase"], "base-Completed");
+        assert_eq!(json["packages"][0]["requested_packages"][0], "split");
+        assert_eq!(json["packages"][0]["analysis"]["status"], "completed");
+        assert_eq!(json["packages"][0]["analysis"]["source"], "cache");
+        assert_eq!(json["packages"][0]["analysis"]["model"], "pinned-model");
+        assert_eq!(
+            json["packages"][0]["analysis"]["review_strategy_id"],
+            "findings_first_v1"
+        );
+        assert_eq!(json["packages"][0]["analysis"]["prompt_version"], 1);
+        assert_eq!(
+            json["packages"][0]["analysis"]["bundle_hash"],
+            "ab".repeat(32)
+        );
+        assert_eq!(
+            json["packages"][0]["analysis"]["coverage"]["included_files"],
+            2
+        );
+        assert_eq!(json["summary"]["completed"], 2);
+        assert_eq!(json["summary"]["cache_hit"], 1);
+        assert_eq!(json["summary"]["unavailable"], 1);
+        assert_eq!(json["summary"]["incomplete"], 1);
+        assert!(json["packages"][2]["analysis"].get("source").is_none());
+        assert!(json["packages"][2]["analysis"].get("usage").is_none());
+        assert_eq!(json["preflight"]["endpoint_host"], "localhost");
+        assert_eq!(json["preflight"]["encoded_request_bytes"], 400);
+    }
+
+    #[test]
+    fn deep_text_names_llm_provenance_ceiling_and_zero_findings_without_clearance() {
+        use crate::deep_scan::{DeepPackageReport, DeepPreflight, DeepRun};
+        use aurscan_llm::{
+            AnalysisOutcome, AnalysisSource, AnalysisStatus, BundleCoverage, CoverageMode,
+        };
+        let run = DeepRun {
+            packages: vec![DeepPackageReport {
+                pkgbase: "base".into(),
+                requested_packages: vec!["split".into()],
+                combined: report("base", Verdict::Clean, vec![]),
+                analysis: AnalysisOutcome {
+                    status: AnalysisStatus::Completed,
+                    source: Some(AnalysisSource::Cache),
+                    findings: vec![],
+                    identity: None,
+                    usage: None,
+                    reason: None,
+                },
+                coverage: BundleCoverage {
+                    mode: CoverageMode::ConservativeLocal,
+                    included_files: 1,
+                    excluded_binary_files: vec![],
+                    excluded_symlinks: vec![],
+                },
+            }],
+            exit_code: 0,
+        };
+        let preflight = DeepPreflight {
+            endpoint_host: "localhost".into(),
+            model: "model".into(),
+            package_count: 1,
+            original_bytes: 10,
+            encoded_request_bytes: 100,
+            large_request_mode: false,
+        };
+        let text = render_deep_text(&run, &preflight, &AckStore::from_keys([]), false, false);
+        assert!(text.contains("LLM provenance"));
+        assert!(text.contains("Advisory ceiling"));
+        assert!(text.contains("prompt version=1"));
+        assert!(text.contains("cache"));
+        assert!(text.contains("conservative_local"));
+        assert!(text.contains("no accepted LLM findings"));
+        assert!(!text.to_ascii_lowercase().contains("model clean"));
     }
 }

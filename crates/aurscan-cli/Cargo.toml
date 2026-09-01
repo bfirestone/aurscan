@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 aurscan-core = { path = "../aurscan-core" }
 aurscan-detectors = { path = "../aurscan-detectors" }
+aurscan-llm = { path = "../aurscan-llm" }
 anyhow.workspace = true
 blake3.workspace = true
 serde.workspace = true
