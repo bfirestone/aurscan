@@ -5,7 +5,7 @@ use crate::ack::{apply_acks, AckStore};
 use crate::aur_rpc::{self, AurInfo};
 use crate::config::Config;
 use crate::flow::ScannedAurPackage;
-use crate::{flow, registry, report};
+use crate::{fetch, flow, registry, report};
 use anyhow::Context;
 use aurscan_core::{compute_verdict, PackageReport, Verdict};
 use aurscan_llm::{
@@ -339,35 +339,66 @@ const MAX_LOCAL_METADATA_BYTES: u64 = 1024 * 1024;
 /// any PKGBUILD code. A checked-in `.SRCINFO` is authoritative; otherwise a
 /// deliberately narrow literal PKGBUILD subset is the only accepted fallback.
 fn parse_local_recipe_metadata(directory: &Path) -> anyhow::Result<LocalRecipeMetadata> {
-    ensure_regular_recipe_file(&directory.join("PKGBUILD"), "PKGBUILD")?;
-    let srcinfo = directory.join(".SRCINFO");
-    match std::fs::symlink_metadata(&srcinfo) {
-        Ok(_) => parse_srcinfo_metadata(&read_regular_metadata_file(&srcinfo, ".SRCINFO")?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let pkgbuild = directory.join("PKGBUILD");
-            parse_literal_pkgbuild_metadata(&read_regular_metadata_file(&pkgbuild, "PKGBUILD")?)
-        }
-        Err(error) => Err(error)
-            .with_context(|| format!("cannot inspect local metadata {}", srcinfo.display())),
-    }
-}
-
-fn ensure_regular_recipe_file(path: &Path, label: &str) -> anyhow::Result<()> {
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("cannot inspect {label} at {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    let canonical = directory.canonicalize().with_context(|| {
+        format!(
+            "cannot canonicalize local recipe root {}",
+            directory.display()
+        )
+    })?;
+    if canonical != directory {
         anyhow::bail!(
-            "{label} must be a regular non-symlink file: {}",
-            path.display()
+            "local recipe root must be canonical and must not use symlinked ancestors: {}",
+            directory.display()
         );
     }
-    Ok(())
+    let root = fetch::SecureRoot::open_canonical(&canonical).with_context(|| {
+        format!(
+            "cannot securely open local recipe root {}",
+            canonical.display()
+        )
+    })?;
+    let pkgbuild = root
+        .open_regular_file(Path::new("PKGBUILD"))
+        .map_err(anyhow::Error::new)
+        .with_context(|| {
+            format!(
+                "cannot securely open PKGBUILD beneath {}",
+                canonical.display()
+            )
+        })?;
+
+    match root.open_regular_file(Path::new(".SRCINFO")) {
+        Ok(srcinfo) => parse_srcinfo_metadata(&read_metadata_descriptor(
+            srcinfo,
+            ".SRCINFO",
+            &canonical.join(".SRCINFO"),
+        )?),
+        Err(fetch::SecureOpenError::Absent) => parse_literal_pkgbuild_metadata(
+            &read_metadata_descriptor(pkgbuild, "PKGBUILD", &canonical.join("PKGBUILD"))?,
+        ),
+        Err(error) => Err(anyhow::Error::new(error)).with_context(|| {
+            format!(
+                "cannot securely open .SRCINFO beneath {}",
+                canonical.display()
+            )
+        }),
+    }
 }
 
-fn read_regular_metadata_file(path: &Path, label: &str) -> anyhow::Result<String> {
-    ensure_regular_recipe_file(path, label)?;
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("cannot inspect {label} at {}", path.display()))?;
+fn read_metadata_descriptor(
+    mut file: std::fs::File,
+    label: &str,
+    path: &Path,
+) -> anyhow::Result<String> {
+    let metadata = file.metadata().with_context(|| {
+        format!(
+            "cannot inspect opened {label} descriptor at {}",
+            path.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        anyhow::bail!("{label} must be a regular file: {}", path.display());
+    }
     if metadata.len() > MAX_LOCAL_METADATA_BYTES {
         anyhow::bail!(
             "{label} exceeds the local metadata size limit: {}",
@@ -376,11 +407,15 @@ fn read_regular_metadata_file(path: &Path, label: &str) -> anyhow::Result<String
     }
 
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    std::fs::File::open(path)
-        .with_context(|| format!("cannot read {label} at {}", path.display()))?
+    (&mut file)
         .take(MAX_LOCAL_METADATA_BYTES + 1)
         .read_to_end(&mut bytes)
-        .with_context(|| format!("cannot read {label} at {}", path.display()))?;
+        .with_context(|| {
+            format!(
+                "cannot read opened {label} descriptor at {}",
+                path.display()
+            )
+        })?;
     if bytes.len() as u64 > MAX_LOCAL_METADATA_BYTES {
         anyhow::bail!(
             "{label} exceeds the local metadata size limit: {}",
@@ -958,6 +993,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn local_metadata_rejects_a_symlinked_recipe_root_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let recipe = parent.path().join("recipe");
+        std::fs::create_dir(&recipe).unwrap();
+        std::fs::write(recipe.join("PKGBUILD"), "pkgname=canonical\n").unwrap();
+        let linked = parent.path().join("linked-recipe");
+        symlink("recipe", &linked).unwrap();
+
+        assert!(parse_local_recipe_metadata(&linked).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn local_metadata_rejects_symlinked_metadata_files() {
         use std::os::unix::fs::symlink;
 
@@ -997,6 +1047,39 @@ mod tests {
         .unwrap();
 
         assert!(parse_local_recipe_metadata(dir.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_metadata_rejects_special_metadata_files() {
+        use std::os::unix::net::UnixListener;
+
+        let srcinfo_recipe = local_recipe(None, "pkgname=canonical\n");
+        let _srcinfo_socket = UnixListener::bind(srcinfo_recipe.path().join(".SRCINFO")).unwrap();
+        assert!(parse_local_recipe_metadata(srcinfo_recipe.path()).is_err());
+
+        let pkgbuild_recipe = tempfile::tempdir().unwrap();
+        let _pkgbuild_socket = UnixListener::bind(pkgbuild_recipe.path().join("PKGBUILD")).unwrap();
+        assert!(parse_local_recipe_metadata(pkgbuild_recipe.path()).is_err());
+    }
+
+    #[test]
+    fn local_metadata_reads_use_the_descriptor_anchored_secure_open_api() {
+        let implementation = include_str!("deep_scan.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let metadata_reader = implementation
+            .split("fn parse_local_recipe_metadata")
+            .nth(1)
+            .unwrap()
+            .split("fn parse_srcinfo_metadata")
+            .next()
+            .unwrap();
+
+        assert!(metadata_reader.contains("fetch::SecureRoot"));
+        assert!(!metadata_reader.contains("symlink_metadata"));
+        assert!(!metadata_reader.contains("File::open"));
     }
 
     #[test]
