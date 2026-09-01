@@ -5,7 +5,13 @@ use anyhow::{anyhow, bail, Context};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path};
-use std::process::{Command, Stdio};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static GIT_SPAWN_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg(target_os = "linux")]
 use std::ffi::{CString, OsStr};
@@ -232,17 +238,15 @@ impl CollectionBudget {
 }
 
 fn git_tracked_paths(root: &Path, limits: BundleLimits) -> anyhow::Result<Vec<String>> {
-    let mut child = sanitized_git_command(root)
-        .args(["ls-files", "-z", "--"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("failed to run git ls-files")?;
-    let stdout = child.stdout.take().expect("piped stdout is available");
+    let mut budget = CollectionBudget::new(limits)?;
+    let mut child =
+        ReapingChild::new(spawn_git_ls_files(root).context("failed to run git ls-files")?);
+    let stdout = child
+        .take_stdout()
+        .ok_or_else(|| anyhow!("git ls-files stdout was unavailable"))?;
     let mut reader = BufReader::new(stdout);
     let mut raw = Vec::new();
     let mut paths = Vec::new();
-    let mut budget = CollectionBudget::new(limits)?;
     let collected = (|| -> anyhow::Result<()> {
         while read_bounded_nul_record(&mut reader, &mut raw)? {
             if raw.is_empty() {
@@ -260,11 +264,7 @@ fn git_tracked_paths(root: &Path, limits: BundleLimits) -> anyhow::Result<Vec<St
         }
         Ok(())
     })();
-    if let Err(error) = collected {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
-    }
+    collected?;
     if !child.wait()?.success() {
         bail!("git ls-files failed for recipe root");
     }
@@ -292,6 +292,60 @@ fn read_bounded_nul_record(
             return Ok(true);
         }
     }
+}
+
+struct ReapingChild {
+    child: Child,
+    reaped: bool,
+}
+
+impl ReapingChild {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+
+    fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    fn wait(mut self) -> std::io::Result<ExitStatus> {
+        let status = self.child.wait();
+        self.reaped = status.is_ok();
+        status
+    }
+}
+
+impl Drop for ReapingChild {
+    fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
+        let _ = self.child.kill();
+        loop {
+            match self.child.wait() {
+                Ok(_) => {
+                    self.reaped = true;
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+fn spawn_git_ls_files(root: &Path) -> std::io::Result<Child> {
+    #[cfg(test)]
+    GIT_SPAWN_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+
+    sanitized_git_command(root)
+        .args(["ls-files", "-z", "--"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
 }
 
 fn sanitized_git_command(root: &Path) -> Command {
@@ -370,6 +424,30 @@ fn conservative_paths(root: &Path, limits: BundleLimits) -> anyhow::Result<Vec<S
 
 fn is_srcinfo(path: &str) -> bool {
     path.rsplit('/').next() == Some(".SRCINFO")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_process_limits_do_not_start_git() {
+        GIT_SPAWN_ATTEMPTS.store(0, Ordering::SeqCst);
+        let result = git_tracked_paths(
+            Path::new("."),
+            BundleLimits {
+                max_files: PROCESS_MAX_CANDIDATES + 1,
+                max_file_bytes: 1,
+                max_bundle_bytes: 1,
+            },
+        );
+
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("file count limit exceeds process maximum"));
+        assert_eq!(GIT_SPAWN_ATTEMPTS.load(Ordering::SeqCst), 0);
+    }
 }
 
 fn is_conservative_candidate(path: &str) -> bool {
