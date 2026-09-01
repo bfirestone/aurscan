@@ -21,18 +21,40 @@ pub(crate) fn terminal_safe(value: &str) -> String {
     escaped
 }
 
+/// Unicode 17.0.0 `General_Category=Format` (`Cf`) scalar ranges.
+///
+/// Keep this table explicit so terminal escaping stays auditable when Unicode
+/// adds format characters in a later release.
+const UNICODE_FORMAT_RANGES: &[(char, char)] = &[
+    ('\u{00ad}', '\u{00ad}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061c}', '\u{061c}'),
+    ('\u{06dd}', '\u{06dd}'),
+    ('\u{070f}', '\u{070f}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08e2}', '\u{08e2}'),
+    ('\u{180e}', '\u{180e}'),
+    ('\u{200b}', '\u{200f}'),
+    ('\u{202a}', '\u{202e}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206f}'),
+    ('\u{feff}', '\u{feff}'),
+    ('\u{fff9}', '\u{fffb}'),
+    ('\u{110bd}', '\u{110bd}'),
+    ('\u{110cd}', '\u{110cd}'),
+    ('\u{13430}', '\u{1343f}'),
+    ('\u{1bca0}', '\u{1bca3}'),
+    ('\u{1d173}', '\u{1d17a}'),
+    ('\u{e0001}', '\u{e0001}'),
+    ('\u{e0020}', '\u{e007f}'),
+];
+
 fn is_non_printing(character: char) -> bool {
     character.is_control()
-        || matches!(
-            character,
-            '\u{00ad}'
-                | '\u{061c}'
-                | '\u{200b}'..='\u{200f}'
-                | '\u{2028}'..='\u{202e}'
-                | '\u{2060}'..='\u{206f}'
-                | '\u{feff}'
-                | '\u{fff9}'..='\u{fffb}'
-        )
+        || matches!(character, '\u{2028}' | '\u{2029}')
+        || UNICODE_FORMAT_RANGES
+            .iter()
+            .any(|&(start, end)| (start..=end).contains(&character))
 }
 
 /// Human-readable, severity-sorted report. `Info` findings ride along only when
@@ -607,20 +629,75 @@ mod tests {
     }
 
     #[test]
-    fn terminal_safety_visibly_escapes_controls_and_bidi_without_mutating_json() {
-        let unsafe_text = "pkg\u{1b}\r\u{85}\u{2028}\u{2029}\u{202e}\u{200b}";
+    fn terminal_safety_visibly_escapes_controls_and_unicode_format_characters_without_mutating_json(
+    ) {
+        let escape_cases = [
+            ("C0 control", '\u{001f}', "\\u{1f}"),
+            ("C1 control", '\u{009f}', "\\u{9f}"),
+            ("soft hyphen", '\u{00ad}', "\\u{ad}"),
+            ("Arabic number signs", '\u{0600}', "\\u{600}"),
+            ("Arabic letter mark", '\u{061c}', "\\u{61c}"),
+            ("Arabic end of ayah", '\u{06dd}', "\\u{6dd}"),
+            ("Syriac abbreviation mark", '\u{070f}', "\\u{70f}"),
+            ("Arabic currency marks", '\u{0890}', "\\u{890}"),
+            ("Arabic disputed end of ayah", '\u{08e2}', "\\u{8e2}"),
+            ("Mongolian vowel separator", '\u{180e}', "\\u{180e}"),
+            ("zero-width and directional marks", '\u{200e}', "\\u{200e}"),
+            ("line separator", '\u{2028}', "\\u{2028}"),
+            ("paragraph separator", '\u{2029}', "\\u{2029}"),
+            ("bidi embeddings and overrides", '\u{202e}', "\\u{202e}"),
+            (
+                "word joiner and invisible operators",
+                '\u{2060}',
+                "\\u{2060}",
+            ),
+            (
+                "bidi isolates and related format characters",
+                '\u{2066}',
+                "\\u{2066}",
+            ),
+            ("byte order mark", '\u{feff}', "\\u{feff}"),
+            (
+                "interlinear annotation format characters",
+                '\u{fff9}',
+                "\\u{fff9}",
+            ),
+            ("Kaithi number sign", '\u{110bd}', "\\u{110bd}"),
+            ("Kaithi number sign alternate", '\u{110cd}', "\\u{110cd}"),
+            (
+                "Egyptian hieroglyph format controls",
+                '\u{13430}',
+                "\\u{13430}",
+            ),
+            ("shorthand format controls", '\u{1bca0}', "\\u{1bca0}"),
+            ("musical symbol format controls", '\u{1d173}', "\\u{1d173}"),
+            ("language tag", '\u{e0001}', "\\u{e0001}"),
+            ("tag characters", '\u{e0020}', "\\u{e0020}"),
+        ];
+        for (name, character, expected) in escape_cases {
+            assert_eq!(terminal_safe(&character.to_string()), expected, "{name}");
+        }
+
+        for (name, printable) in [
+            ("C0-adjacent space", "\u{0020}"),
+            ("C1-adjacent non-breaking space", "\u{00a0}"),
+            ("before bidi embedding controls", "\u{2027}"),
+            ("after bidi embedding controls", "\u{2030}"),
+            ("ordinary printable Unicode", "é中😀"),
+        ] {
+            assert_eq!(terminal_safe(printable), printable, "{name}");
+        }
+
+        let unsafe_text = "pkg\u{1b}\r\u{85}\u{180e}\u{2028}\u{2029}\u{202e}\u{200b}";
         let escaped = terminal_safe(unsafe_text);
         assert!(!escaped.contains('\u{1b}'));
         assert!(!escaped.contains('\r'));
         assert!(!escaped.contains('\u{85}'));
+        assert!(!escaped.contains('\u{180e}'));
         assert!(!escaped.contains('\u{2028}'));
         assert!(!escaped.contains('\u{2029}'));
         assert!(!escaped.contains('\u{202e}'));
         assert!(!escaped.contains('\u{200b}'));
-        assert!(escaped.contains("\\u{1b}"));
-        assert!(escaped.contains("\\u{2028}"));
-        assert!(escaped.contains("\\u{2029}"));
-        assert!(escaped.contains("\\u{202e}"));
 
         let mut f = finding(Severity::Medium, unsafe_text, unsafe_text);
         f.evidence.location = unsafe_text.into();
@@ -632,10 +709,12 @@ mod tests {
             false,
         );
         assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains('\u{180e}'));
         assert!(!text.contains('\u{2028}'));
         assert!(!text.contains('\u{2029}'));
         assert!(!text.contains('\u{202e}'));
         assert!(text.contains("\\u{1b}"));
+        assert!(text.contains("\\u{180e}"));
 
         let json = render_json(&[rep]);
         assert_eq!(json["reports"][0]["package"], unsafe_text);
