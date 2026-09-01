@@ -28,7 +28,7 @@ fn is_non_printing(character: char) -> bool {
             '\u{00ad}'
                 | '\u{061c}'
                 | '\u{200b}'..='\u{200f}'
-                | '\u{202a}'..='\u{202e}'
+                | '\u{2028}'..='\u{202e}'
                 | '\u{2060}'..='\u{206f}'
                 | '\u{feff}'
                 | '\u{fff9}'..='\u{fffb}'
@@ -218,12 +218,12 @@ pub(crate) fn render_deep_json(
                     .map(|identity| identity.prompt_version)
                     .unwrap_or(aurscan_llm::PROMPT_VERSION)),
             );
-            if let Some(identity) = identity {
-                analysis.insert(
-                    "bundle_hash".into(),
-                    serde_json::Value::String(hex_bytes(&identity.bundle_hash)),
-                );
-            }
+            analysis.insert(
+                "bundle_hash".into(),
+                identity.map_or(serde_json::Value::Null, |identity| {
+                    serde_json::Value::String(hex_bytes(&identity.bundle_hash))
+                }),
+            );
             analysis.insert(
                 "coverage".into(),
                 serde_json::to_value(&package.coverage).unwrap(),
@@ -608,14 +608,18 @@ mod tests {
 
     #[test]
     fn terminal_safety_visibly_escapes_controls_and_bidi_without_mutating_json() {
-        let unsafe_text = "pkg\u{1b}\r\u{85}\u{202e}\u{200b}";
+        let unsafe_text = "pkg\u{1b}\r\u{85}\u{2028}\u{2029}\u{202e}\u{200b}";
         let escaped = terminal_safe(unsafe_text);
         assert!(!escaped.contains('\u{1b}'));
         assert!(!escaped.contains('\r'));
         assert!(!escaped.contains('\u{85}'));
+        assert!(!escaped.contains('\u{2028}'));
+        assert!(!escaped.contains('\u{2029}'));
         assert!(!escaped.contains('\u{202e}'));
         assert!(!escaped.contains('\u{200b}'));
         assert!(escaped.contains("\\u{1b}"));
+        assert!(escaped.contains("\\u{2028}"));
+        assert!(escaped.contains("\\u{2029}"));
         assert!(escaped.contains("\\u{202e}"));
 
         let mut f = finding(Severity::Medium, unsafe_text, unsafe_text);
@@ -628,6 +632,8 @@ mod tests {
             false,
         );
         assert!(!text.contains('\u{1b}'));
+        assert!(!text.contains('\u{2028}'));
+        assert!(!text.contains('\u{2029}'));
         assert!(!text.contains('\u{202e}'));
         assert!(text.contains("\\u{1b}"));
 
@@ -712,8 +718,8 @@ mod tests {
         );
         assert_eq!(json["packages"][0]["analysis"]["prompt_version"], 1);
         assert_eq!(
-            json["packages"][0]["analysis"]["bundle_hash"],
-            "ab".repeat(32)
+            json["packages"][0]["analysis"].get("bundle_hash"),
+            Some(&serde_json::Value::String("ab".repeat(32)))
         );
         assert_eq!(
             json["packages"][0]["analysis"]["coverage"]["included_files"],
@@ -727,6 +733,48 @@ mod tests {
         assert!(json["packages"][2]["analysis"].get("usage").is_none());
         assert_eq!(json["preflight"]["endpoint_host"], "localhost");
         assert_eq!(json["preflight"]["encoded_request_bytes"], 400);
+    }
+
+    #[test]
+    fn deep_json_emits_null_bundle_hash_without_analysis_identity() {
+        use crate::deep_scan::{DeepPackageReport, DeepPreflight, DeepRun};
+        use aurscan_llm::{AnalysisOutcome, AnalysisStatus, BundleCoverage, CoverageMode};
+
+        let run = DeepRun {
+            packages: vec![DeepPackageReport {
+                pkgbase: "base".into(),
+                requested_packages: vec!["split".into()],
+                combined: report("base", Verdict::Clean, vec![]),
+                analysis: AnalysisOutcome {
+                    status: AnalysisStatus::Unavailable,
+                    source: None,
+                    findings: vec![],
+                    identity: None,
+                    usage: None,
+                    reason: Some("offline".into()),
+                },
+                coverage: BundleCoverage {
+                    mode: CoverageMode::ConservativeLocal,
+                    included_files: 0,
+                    excluded_binary_files: vec![],
+                    excluded_symlinks: vec![],
+                },
+            }],
+            exit_code: 0,
+        };
+        let preflight = DeepPreflight {
+            endpoint_host: "localhost".into(),
+            model: "model".into(),
+            package_count: 1,
+            original_bytes: 0,
+            encoded_request_bytes: 0,
+            large_request_mode: false,
+        };
+
+        let analysis = &render_deep_json(&run, &preflight)["packages"][0]["analysis"];
+        assert_eq!(analysis.get("bundle_hash"), Some(&serde_json::Value::Null));
+        assert!(analysis.get("source").is_none());
+        assert!(analysis.get("usage").is_none());
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //!   proceeds with a printed pointer to `check`/`ack`.
 //! - `allow` entries downgrade that package's `Block` to a logged override.
 
+use crate::report;
 use aurscan_core::{PackageReport, Verdict};
 use std::io::{IsTerminal, Write};
 
@@ -78,7 +79,7 @@ pub fn decide(
             Verdict::Block(_) if allow.iter().any(|a| a == &report.package) => {
                 eprintln!(
                     "note: {} is Block but allow-listed; overriding",
-                    report.package
+                    report::terminal_safe(&report.package)
                 );
             }
             Verdict::Block(findings) => {
@@ -93,9 +94,10 @@ pub fn decide(
                         return GateOutcome::Abort;
                     }
                 } else if hook {
+                    let package = report::terminal_safe(&report.package);
                     eprintln!(
                         "note: {0} has advisory findings; run `aurscan check {0}` to review or `aurscan ack {0}` to acknowledge",
-                        report.package
+                        package
                     );
                 }
             }
@@ -107,7 +109,8 @@ pub fn decide(
 
 fn confirm_override(package: &str, findings: &[aurscan_core::Finding]) -> bool {
     print_findings(package, findings);
-    print!("Type '{package}' to override and proceed anyway: ");
+    let display_package = report::terminal_safe(package);
+    print!("Type '{display_package}' to override and proceed anyway: ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).is_ok() && line.trim() == package
@@ -115,7 +118,8 @@ fn confirm_override(package: &str, findings: &[aurscan_core::Finding]) -> bool {
 
 fn confirm_proceed(package: &str, findings: &[aurscan_core::Finding]) -> bool {
     print_findings(package, findings);
-    print!("Proceed with {package}? [y/N] ");
+    let display_package = report::terminal_safe(package);
+    print!("Proceed with {display_package}? [y/N] ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     std::io::stdin().read_line(&mut line).is_ok()
@@ -123,13 +127,20 @@ fn confirm_proceed(package: &str, findings: &[aurscan_core::Finding]) -> bool {
 }
 
 fn print_findings(package: &str, findings: &[aurscan_core::Finding]) {
-    eprintln!("{package}:");
-    for f in findings {
-        eprintln!(
-            "  [{:?}] {} ({})",
-            f.severity, f.reason, f.evidence.location
-        );
+    eprint!("{}", format_findings(package, findings));
+}
+
+fn format_findings(package: &str, findings: &[aurscan_core::Finding]) -> String {
+    let mut output = format!("{}:\n", report::terminal_safe(package));
+    for finding in findings {
+        output.push_str(&format!(
+            "  [{:?}] {} ({})\n",
+            finding.severity,
+            report::terminal_safe(&finding.reason),
+            report::terminal_safe(&finding.evidence.location)
+        ));
     }
+    output
 }
 
 #[cfg(test)]
@@ -213,5 +224,21 @@ mod tests {
         )];
         let outcome = decide(&reports, &[], true, true);
         assert_eq!(outcome, GateOutcome::Proceed);
+    }
+
+    #[test]
+    fn finding_output_escapes_untrusted_detector_strings() {
+        let mut unsafe_finding = finding(Severity::Critical);
+        unsafe_finding.reason = "reason\u{2028}\u{2029}\u{1b}".into();
+        unsafe_finding.evidence.location = "location\u{202e}".into();
+
+        let displayed = format_findings("package\u{2028}", &[unsafe_finding]);
+        assert!(!displayed.contains('\u{1b}'));
+        assert!(!displayed.contains('\u{2028}'));
+        assert!(!displayed.contains('\u{2029}'));
+        assert!(!displayed.contains('\u{202e}'));
+        assert!(displayed.contains("package\\u{2028}"));
+        assert!(displayed.contains("reason\\u{2028}\\u{2029}\\u{1b}"));
+        assert!(displayed.contains("location\\u{202e}"));
     }
 }

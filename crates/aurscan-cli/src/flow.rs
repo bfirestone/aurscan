@@ -148,12 +148,7 @@ pub(crate) fn fetch_and_scan(
                 if let Ok(commit) = fetch::head_commit(&dir) {
                     ledger.record(
                         &info.package_base,
-                        crate::commit_ledger::Entry {
-                            commit,
-                            verdict: worst_verdict_label(reports).to_string(),
-                            ruleset_version,
-                            detector_epoch,
-                        },
+                        ledger_entry(commit, reports, ruleset_version, detector_epoch),
                     );
                 }
             })?;
@@ -173,6 +168,20 @@ fn after_completed_scan(
     let reports = scan_result?;
     record(&reports);
     Ok(reports)
+}
+
+fn ledger_entry(
+    commit: String,
+    reports: &[PackageReport],
+    ruleset_version: u32,
+    detector_epoch: u32,
+) -> crate::commit_ledger::Entry {
+    crate::commit_ledger::Entry {
+        commit,
+        verdict: worst_verdict_label(reports).to_string(),
+        ruleset_version,
+        detector_epoch,
+    }
 }
 
 /// The worst verdict across `reports`, as the ledger's label.
@@ -368,6 +377,28 @@ mod tests {
         ];
         for (clean, require_checkout, expected) in cases {
             assert_eq!(fetch_plan(clean, require_checkout), expected);
+        }
+    }
+
+    #[test]
+    fn ledger_entry_preserves_identity_and_maps_worst_verdict() {
+        for (verdict, expected_label) in [
+            (Verdict::Clean, "clean"),
+            (Verdict::Advisory(vec![]), "advisory"),
+            (Verdict::Block(vec![]), "block"),
+        ] {
+            let reports = vec![PackageReport {
+                package: "pkg".into(),
+                verdict,
+                findings: vec![],
+                features: vec![],
+            }];
+
+            let entry = ledger_entry("abc123".into(), &reports, 17, 23);
+            assert_eq!(entry.commit, "abc123");
+            assert_eq!(entry.verdict, expected_label);
+            assert_eq!(entry.ruleset_version, 17);
+            assert_eq!(entry.detector_epoch, 23);
         }
     }
 
