@@ -206,6 +206,12 @@ pub struct AnalyzeOptions {
     pub refresh: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestPreflight {
+    pub original_bytes: usize,
+    pub encoded_request_bytes: usize,
+}
+
 pub trait RecipeBundleBuilder: Send + Sync {
     fn build(
         &self,

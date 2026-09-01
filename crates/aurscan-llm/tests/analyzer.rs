@@ -1,7 +1,8 @@
 use aurscan_llm::{
     validate_config, AnalysisSource, AnalysisStatus, AnalyzeOptions, Analyzer, BundleCoverage,
-    CoverageMode, LlmConfig, RecipeBundle, RecipeFile, ResponseFormat, LLM_ANALYSIS_EPOCH,
-    PROMPT_VERSION, PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
+    CoverageMode, LlmConfig, RecipeBundle, RecipeFile, RequestPreflight, ResponseFormat,
+    LLM_ANALYSIS_EPOCH, PROMPT_VERSION, PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION,
+    REVIEW_STRATEGY_ID,
 };
 use serde_json::json;
 use std::io::{Read, Write};
@@ -232,6 +233,7 @@ limit_cases!(
 struct ScriptedServer {
     origin: String,
     request_count: Arc<Mutex<usize>>,
+    request_body_lengths: Arc<Mutex<Vec<usize>>>,
     overlap: Arc<Mutex<bool>>,
     join: Option<thread::JoinHandle<()>>,
 }
@@ -241,13 +243,16 @@ impl ScriptedServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let request_count = Arc::new(Mutex::new(0));
+        let request_body_lengths = Arc::new(Mutex::new(Vec::new()));
         let overlap = Arc::new(Mutex::new(false));
         let thread_count = request_count.clone();
+        let thread_body_lengths = request_body_lengths.clone();
         let thread_overlap = overlap.clone();
         let join = thread::spawn(move || {
             for _ in 0..count {
                 let (mut stream, _) = listener.accept().unwrap();
-                consume_request(&mut stream);
+                let request_body = consume_request(&mut stream);
+                thread_body_lengths.lock().unwrap().push(request_body.len());
                 *thread_count.lock().unwrap() += 1;
 
                 listener.set_nonblocking(true).unwrap();
@@ -269,6 +274,7 @@ impl ScriptedServer {
         Self {
             origin,
             request_count,
+            request_body_lengths,
             overlap,
             join: Some(join),
         }
@@ -287,6 +293,10 @@ impl ScriptedServer {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn body_lengths(&self) -> Vec<usize> {
+        self.request_body_lengths.lock().unwrap().clone()
     }
 
     fn overlapped(&self) -> bool {
@@ -321,7 +331,7 @@ fn write_response(stream: &mut TcpStream, status: &str, body: &str) {
     .unwrap();
 }
 
-fn consume_request(stream: &mut TcpStream) {
+fn consume_request(stream: &mut TcpStream) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -343,7 +353,7 @@ fn consume_request(stream: &mut TcpStream) {
                 })
                 .unwrap();
             if bytes.len() >= header_end + content_length {
-                return;
+                return bytes[header_end..header_end + content_length].to_vec();
             }
         }
     }
@@ -589,4 +599,144 @@ fn identity_covers_all_fixed_versions_bytes_origin_model_and_request_profile() {
             "request profile case {index} did not change identity"
         );
     }
+}
+
+#[test]
+fn preflight_empty_input_returns_no_metrics() {
+    let directory = TempDir::new().unwrap();
+    let analyzer = analyzer_at(analyzer_config("http://127.0.0.1:9"), &directory);
+
+    let preflight: Vec<RequestPreflight> = analyzer.preflight_batch(&[]).unwrap();
+
+    assert!(preflight.is_empty());
+}
+
+#[test]
+fn preflight_counts_utf8_content_bytes_and_preserves_input_order() {
+    let directory = TempDir::new().unwrap();
+    let analyzer = analyzer_at(analyzer_config("http://127.0.0.1:9"), &directory);
+    let mut first = recipe_bundle(11, "first");
+    first.files = vec![
+        RecipeFile {
+            path: "PKGBUILD".into(),
+            content: "é".into(),
+        },
+        RecipeFile {
+            path: "ignored-path".into(),
+            content: "abc".into(),
+        },
+    ];
+    let mut second = recipe_bundle(12, "second");
+    second.files[0].content = "пакет".into();
+
+    let preflight = analyzer.preflight_batch(&[first, second]).unwrap();
+
+    assert_eq!(preflight.len(), 2);
+    assert_eq!(preflight[0].original_bytes, 5);
+    assert_eq!(preflight[1].original_bytes, 10);
+    assert!(preflight
+        .iter()
+        .all(|metrics| metrics.encoded_request_bytes > 0));
+}
+
+#[test]
+fn preflight_encoded_size_matches_the_body_sent_to_the_provider() {
+    let server = ScriptedServer::completed_responses(1);
+    let directory = TempDir::new().unwrap();
+    let analyzer = analyzer_at(analyzer_config(&server.origin), &directory);
+    let bundle = recipe_bundle(13, "encoded-size-parity");
+
+    let preflight = analyzer
+        .preflight_batch(std::slice::from_ref(&bundle))
+        .unwrap();
+    assert_eq!(preflight.len(), 1);
+    assert_eq!(server.count(), 0);
+    let outcomes = analyzer.analyze_batch(
+        std::slice::from_ref(&bundle),
+        AnalyzeOptions { refresh: false },
+    );
+
+    server.wait_for_count(1);
+    assert_eq!(outcomes[0].status, AnalysisStatus::Completed);
+    assert_eq!(
+        server.body_lengths(),
+        vec![preflight[0].encoded_request_bytes]
+    );
+}
+
+#[test]
+fn preflight_does_not_read_credentials_connect_or_mutate_the_cache() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let variable = "AURSCAN_PREFLIGHT_KEY_THAT_MUST_NOT_EXIST";
+    std::env::remove_var(variable);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let directory = TempDir::new().unwrap();
+    let cache_path = directory.path().join("llm.redb");
+    let mut config = analyzer_config(&format!("http://{}", listener.local_addr().unwrap()));
+    config.api_key_env = Some(variable.into());
+    let analyzer =
+        Analyzer::with_cache_path(validate_config(&config).unwrap(), cache_path.clone()).unwrap();
+    let cache_before = std::fs::read(&cache_path).unwrap();
+
+    let preflight = analyzer
+        .preflight_batch(&[recipe_bundle(14, "side-effect-free")])
+        .unwrap();
+
+    assert_eq!(preflight.len(), 1);
+    assert_eq!(cache_before, std::fs::read(&cache_path).unwrap());
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+fn preflight_encoded_size(config: LlmConfig, bundle: &RecipeBundle) -> usize {
+    let directory = TempDir::new().unwrap();
+    analyzer_at(config, &directory)
+        .preflight_batch(std::slice::from_ref(bundle))
+        .unwrap()[0]
+        .encoded_request_bytes
+}
+
+#[test]
+fn preflight_size_tracks_canonical_body_inputs() {
+    let origin = "http://127.0.0.1:9";
+    let baseline_config = analyzer_config(origin);
+    let bundle = recipe_bundle(15, "canonical-inputs");
+    let baseline = preflight_encoded_size(baseline_config.clone(), &bundle);
+
+    let mut changed_model = baseline_config.clone();
+    changed_model.model = "a-much-longer-model-name".into();
+    assert_ne!(baseline, preflight_encoded_size(changed_model, &bundle));
+
+    let mut changed_response_format = baseline_config.clone();
+    changed_response_format.response_format = ResponseFormat::JsonObject;
+    assert_ne!(
+        baseline,
+        preflight_encoded_size(changed_response_format, &bundle)
+    );
+
+    let mut changed_max_output_tokens = baseline_config.clone();
+    changed_max_output_tokens.max_output_tokens = 999;
+    assert_ne!(
+        baseline,
+        preflight_encoded_size(changed_max_output_tokens, &bundle)
+    );
+
+    let mut changed_file_content = bundle.clone();
+    changed_file_content.files[0]
+        .content
+        .push_str("additional prompt content");
+    assert_ne!(
+        baseline,
+        preflight_encoded_size(baseline_config.clone(), &changed_file_content)
+    );
+
+    let mut changed_file_path = bundle.clone();
+    changed_file_path.files[0].path = "a-much-longer-recipe-file-path".into();
+    assert_ne!(
+        baseline,
+        preflight_encoded_size(baseline_config, &changed_file_path)
+    );
 }

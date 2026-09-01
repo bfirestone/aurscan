@@ -5,8 +5,8 @@ use crate::prompt::{build_request, prompt_hash, response_schema_hash, ProviderRe
 use crate::provider::{load_api_key, ModelProvider, OpenAiCompatibleProvider};
 use crate::types::{
     AnalysisIdentity, AnalysisOutcome, AnalysisSource, AnalysisStatus, AnalyzeOptions,
-    PackageAnalyzer, RecipeBundle, LLM_ANALYSIS_EPOCH, PROMPT_VERSION, PROVIDER_PROTOCOL_VERSION,
-    RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
+    PackageAnalyzer, RecipeBundle, RequestPreflight, LLM_ANALYSIS_EPOCH, PROMPT_VERSION,
+    PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,6 +37,31 @@ impl Analyzer {
 
     pub fn analysis_identity(&self, bundle: &RecipeBundle) -> AnalysisIdentity {
         analysis_identity(bundle, &self.config)
+    }
+
+    pub fn preflight_batch(
+        &self,
+        bundles: &[RecipeBundle],
+    ) -> anyhow::Result<Vec<RequestPreflight>> {
+        let mut preflight = Vec::with_capacity(bundles.len());
+        for bundle in bundles {
+            let original_bytes = bundle.files.iter().try_fold(0_usize, |total, file| {
+                total
+                    .checked_add(file.content.len())
+                    .ok_or_else(|| anyhow::anyhow!("original recipe byte count overflow"))
+            })?;
+            let encoded_request_bytes = {
+                let identity = analysis_identity(bundle, &self.config);
+                let (_, encoded_body) = prepare_request(bundle, &self.config, identity)
+                    .map_err(|_| anyhow::anyhow!("request rendering failed"))?;
+                encoded_body.len()
+            };
+            preflight.push(RequestPreflight {
+                original_bytes,
+                encoded_request_bytes,
+            });
+        }
+        Ok(preflight)
     }
 
     pub fn analyze_batch(
