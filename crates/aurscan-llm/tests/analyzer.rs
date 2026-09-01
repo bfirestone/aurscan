@@ -102,6 +102,40 @@ fn only_literal_loopback_may_use_http_and_remote_https_requires_consent() {
 }
 
 #[test]
+fn http_loopback_requires_an_unambiguous_configured_authority() {
+    let cases = [
+        ("http://2130706433/v1", false),
+        ("http://0x7f000001/v1", false),
+        ("http://127.1/v1", false),
+        ("http://127.0.1/v1", false),
+        ("http://0177.0.0.1/v1", false),
+        ("http://127.00.0.1/v1", false),
+        ("http://127.0.0.01/v1", false),
+        ("http://127.0.0x0.1/v1", false),
+        ("http://user@127.0.0.1/v1", false),
+        ("http://127.0.0.1:65536/v1", false),
+        ("http://127.0.0.1/v1", true),
+        ("http://127.1.2.3:11434/v1", true),
+        ("http://127.255.255.255:1/v1", true),
+        ("http://localhost/v1", true),
+        ("http://LOCALHOST:11434/v1", true),
+        ("http://[::1]/v1", true),
+        ("http://[::1]:11434/v1", true),
+    ];
+
+    for (endpoint, accepted) in cases {
+        let mut config = local_config();
+        config.endpoint = endpoint.into();
+        let result = validate_config(&config);
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "HTTP authority policy mismatch for {endpoint}: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn endpoints_with_ambient_credentials_query_or_fragment_are_rejected() {
     for endpoint in [
         "http://user:pass@localhost/v1",

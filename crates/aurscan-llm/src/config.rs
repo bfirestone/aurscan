@@ -126,17 +126,14 @@ pub fn validate_config(config: &LlmConfig) -> anyhow::Result<ValidatedLlmConfig>
     }
 
     let loopback = is_literal_loopback(endpoint.host().expect("host checked above"));
-    if loopback {
-        if !matches!(endpoint.scheme(), "http" | "https") {
-            bail!("loopback LLM endpoint must use HTTP or HTTPS");
+    if endpoint.scheme() == "http" {
+        if !has_permitted_http_authority(&config.endpoint) {
+            bail!(
+                "HTTP LLM endpoint requires localhost, dotted-decimal 127.0.0.0/8, or bracketed ::1; all other endpoints require HTTPS"
+            );
         }
-    } else {
-        if endpoint.scheme() != "https" {
-            bail!("non-loopback LLM endpoint requires HTTPS");
-        }
-        if !config.allow_remote {
-            bail!("non-loopback LLM endpoint requires allow_remote=true");
-        }
+    } else if !loopback && !config.allow_remote {
+        bail!("non-loopback LLM endpoint requires allow_remote=true");
     }
 
     let uses_large_requests = validate_limit(
@@ -232,6 +229,61 @@ fn is_literal_loopback(host: Host<&str>) -> bool {
         Host::Ipv4(address) => address.octets()[0] == 127,
         Host::Ipv6(address) => IpAddr::V6(address).is_loopback(),
     }
+}
+
+fn has_permitted_http_authority(configured_endpoint: &str) -> bool {
+    let Some((scheme, remainder)) = configured_endpoint.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
+    let authority_end = remainder
+        .find(['/', '?', '#', '\\'])
+        .unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let Some(close) = bracketed.find(']') else {
+            return false;
+        };
+        return &bracketed[..close] == "::1" && valid_port_suffix(&bracketed[close + 1..]);
+    }
+
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) if !host.contains(':') => (host, Some(port)),
+        Some(_) => return false,
+        None => (authority, None),
+    };
+    if port.is_some_and(|port| !valid_port(port)) {
+        return false;
+    }
+    host.eq_ignore_ascii_case("localhost") || is_dotted_decimal_loopback(host)
+}
+
+fn valid_port_suffix(suffix: &str) -> bool {
+    suffix.is_empty() || suffix.strip_prefix(':').is_some_and(valid_port)
+}
+
+fn valid_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok()
+}
+
+fn is_dotted_decimal_loopback(host: &str) -> bool {
+    let octets = host.split('.').collect::<Vec<_>>();
+    octets.len() == 4
+        && octets.iter().all(|octet| {
+            !octet.is_empty()
+                && !(octet.len() > 1 && octet.starts_with('0'))
+                && octet.bytes().all(|byte| byte.is_ascii_digit())
+                && octet.parse::<u8>().is_ok()
+        })
+        && octets[0] == "127"
 }
 
 fn validate_limit<T>(
