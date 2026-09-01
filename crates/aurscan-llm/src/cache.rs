@@ -34,10 +34,8 @@ impl RedbAnalysisCache {
         })
     }
 
-    pub(crate) fn default_path() -> PathBuf {
-        dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("aurscan/llm.redb")
+    pub(crate) fn default_path() -> anyhow::Result<PathBuf> {
+        default_path_from(dirs::cache_dir())
     }
 
     fn key_bytes(identity: &AnalysisIdentity) -> Vec<u8> {
@@ -76,6 +74,12 @@ impl RedbAnalysisCache {
         bytes.extend_from_slice(&identity.analysis_epoch.to_le_bytes());
         bytes
     }
+}
+
+fn default_path_from(cache_directory: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    Ok(cache_directory
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve the current user cache directory"))?
+        .join("aurscan/llm.redb"))
 }
 
 impl AnalysisCache for RedbAnalysisCache {
@@ -215,7 +219,7 @@ impl StoredUsage {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnalysisCache, CompletedClaims, RedbAnalysisCache};
+    use super::{default_path_from, AnalysisCache, CompletedClaims, RedbAnalysisCache};
     use crate::grounding::{CandidateSeverity, GroundedClaim};
     use crate::types::{AnalysisIdentity, LlmFindingKind, TokenUsage};
 
@@ -304,6 +308,17 @@ mod tests {
                 "identity variant unexpectedly hit"
             );
         }
+    }
+
+    #[test]
+    fn default_path_uses_the_user_cache_directory_or_fails_explicitly() {
+        let cache_root = std::path::PathBuf::from("/home/test/.cache");
+        assert_eq!(
+            default_path_from(Some(cache_root)).unwrap(),
+            std::path::PathBuf::from("/home/test/.cache/aurscan/llm.redb")
+        );
+        let error = default_path_from(None).unwrap_err();
+        assert!(error.to_string().contains("user cache directory"));
     }
 
     #[test]

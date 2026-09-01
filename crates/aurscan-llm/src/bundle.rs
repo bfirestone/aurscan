@@ -4,8 +4,19 @@ use crate::types::{
 use anyhow::{anyhow, bail, Context};
 use std::fs;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::process::Command;
+
+#[cfg(target_os = "linux")]
+use std::ffi::{CString, OsStr};
+#[cfg(target_os = "linux")]
+use std::fs::{File, OpenOptions};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(target_os = "linux")]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultRecipeBundleBuilder;
@@ -24,6 +35,7 @@ impl RecipeBundleBuilder for DefaultRecipeBundleBuilder {
             bail!("recipe root is not a directory: {}", root.display());
         }
 
+        let root_directory = open_root_directory(&root)?;
         let git_backed = root.join(".git").exists();
         let paths = if git_backed {
             git_tracked_paths(&root)?
@@ -44,13 +56,21 @@ impl RecipeBundleBuilder for DefaultRecipeBundleBuilder {
             {
                 continue;
             }
-            let full_path = root.join(path_from_normalized(&normalized));
-            let metadata = fs::symlink_metadata(&full_path)
-                .with_context(|| format!("cannot inspect tracked file {normalized}"))?;
-            if metadata.file_type().is_symlink() {
-                excluded_symlinks.push(normalized);
-                continue;
-            }
+            let mut opened = match open_file_beneath(&root_directory, &normalized) {
+                Ok(file) => file,
+                Err(SecureOpenError::FinalSymlink) => {
+                    excluded_symlinks.push(normalized);
+                    continue;
+                }
+                Err(error) => {
+                    return Err(anyhow!(
+                        "cannot securely open recipe file {normalized}: {error}"
+                    ));
+                }
+            };
+            let metadata = opened
+                .metadata()
+                .with_context(|| format!("cannot inspect opened recipe file {normalized}"))?;
             if !metadata.is_file() {
                 bail!("eligible recipe path is not a regular file: {normalized}");
             }
@@ -63,8 +83,8 @@ impl RecipeBundleBuilder for DefaultRecipeBundleBuilder {
             }
 
             let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
-            fs::File::open(&full_path)
-                .with_context(|| format!("cannot open recipe file {normalized}"))?
+            opened
+                .by_ref()
                 .take(limits.max_file_bytes as u64 + 1)
                 .read_to_end(&mut bytes)
                 .with_context(|| format!("cannot read recipe file {normalized}"))?;
@@ -237,6 +257,144 @@ fn normalize_path(path: &Path) -> anyhow::Result<String> {
     Ok(parts.join("/"))
 }
 
-fn path_from_normalized(path: &str) -> PathBuf {
-    path.split('/').collect()
+#[derive(Debug)]
+enum SecureOpenError {
+    UnsafeAncestor(std::io::Error),
+    FinalSymlink,
+    FinalComponent(std::io::Error),
+    #[cfg(not(target_os = "linux"))]
+    UnsupportedPlatform,
+}
+
+impl std::fmt::Display for SecureOpenError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsafeAncestor(error) => write!(
+                formatter,
+                "path has a missing, non-directory, or symlinked ancestor: {error}"
+            ),
+            Self::FinalSymlink => formatter.write_str("final path component is a symlink"),
+            Self::FinalComponent(error) => {
+                write!(formatter, "cannot open final path component: {error}")
+            }
+            #[cfg(not(target_os = "linux"))]
+            Self::UnsupportedPlatform => formatter.write_str(
+                "race-resistant path-beneath file opening is unavailable on this platform",
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+const O_CLOEXEC: i32 = 0o2_000_000;
+#[cfg(target_os = "linux")]
+const O_DIRECTORY: i32 = 0o200_000;
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o400_000;
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4_000;
+#[cfg(target_os = "linux")]
+const ELOOP: i32 = 40;
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn openat(directory_fd: i32, path: *const std::ffi::c_char, flags: i32, mode: u32) -> i32;
+}
+
+#[cfg(target_os = "linux")]
+fn open_root_directory(root: &Path) -> anyhow::Result<File> {
+    let mut directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW)
+        .open("/")
+        .context("cannot open filesystem root for path-beneath traversal")?;
+    for component in root.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = openat_component(
+                    &directory,
+                    name,
+                    O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK,
+                )
+                .with_context(|| {
+                    format!(
+                        "cannot securely open recipe-root component {}",
+                        name.to_string_lossy()
+                    )
+                })?;
+            }
+            _ => bail!("canonical recipe root contains a non-normal path component"),
+        }
+    }
+    Ok(directory)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_root_directory(_root: &Path) -> anyhow::Result<std::fs::File> {
+    Err(anyhow!(SecureOpenError::UnsupportedPlatform))
+}
+
+#[cfg(target_os = "linux")]
+fn open_file_beneath(root: &File, normalized: &str) -> Result<File, SecureOpenError> {
+    let mut components = normalized.split('/').peekable();
+    let Some(first) = components.next() else {
+        return Err(SecureOpenError::FinalComponent(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty path",
+        )));
+    };
+    let mut directory = root.try_clone().map_err(SecureOpenError::UnsafeAncestor)?;
+    let mut component = first;
+
+    loop {
+        if components.peek().is_none() {
+            return match openat_component(
+                &directory,
+                OsStr::new(component),
+                O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK,
+            ) {
+                Ok(file) => Ok(file),
+                Err(error) if error.raw_os_error() == Some(ELOOP) => {
+                    Err(SecureOpenError::FinalSymlink)
+                }
+                Err(error) => Err(SecureOpenError::FinalComponent(error)),
+            };
+        }
+
+        directory = openat_component(
+            &directory,
+            OsStr::new(component),
+            O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK,
+        )
+        .map_err(SecureOpenError::UnsafeAncestor)?;
+        component = components.next().expect("peek proved a component exists");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_file_beneath(
+    _root: &std::fs::File,
+    _normalized: &str,
+) -> Result<std::fs::File, SecureOpenError> {
+    Err(SecureOpenError::UnsupportedPlatform)
+}
+
+#[cfg(target_os = "linux")]
+fn openat_component(directory: &File, component: &OsStr, flags: i32) -> std::io::Result<File> {
+    let component = CString::new(component.as_bytes()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path component contains a NUL byte",
+        )
+    })?;
+    // SAFETY: `component` is a live NUL-terminated C string, `directory` owns a
+    // valid descriptor for the duration of the call, and no creation flag is
+    // supplied, so the zero mode argument is ignored by `openat`.
+    let descriptor = unsafe { openat(directory.as_raw_fd(), component.as_ptr(), flags, 0) };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a nonnegative result from `openat` is a newly owned descriptor.
+    Ok(unsafe { File::from_raw_fd(descriptor) })
 }

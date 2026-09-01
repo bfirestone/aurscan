@@ -288,6 +288,8 @@ fn reasons_must_be_bounded_single_line_control_free_plain_text() {
         "bidi\u{202e}override".to_owned(),
         "deprecated-bidi\u{206a}control".to_owned(),
         "deprecated-bidi\u{206f}control".to_owned(),
+        "unicode\u{2028}line-separator".to_owned(),
+        "unicode\u{2029}paragraph-separator".to_owned(),
         "x".repeat(501),
     ];
     for reason in unsafe_reasons {

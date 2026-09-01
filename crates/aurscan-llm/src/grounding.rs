@@ -161,6 +161,8 @@ fn is_forbidden_reason_char(character: char) -> bool {
             0x061c
                 | 0x200e
                 | 0x200f
+                | 0x2028
+                | 0x2029
                 | 0x202a..=0x202e
                 | 0x2066..=0x206f
         )

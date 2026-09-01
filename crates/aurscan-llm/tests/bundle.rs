@@ -111,7 +111,7 @@ fn local_mode_is_conservative_and_supports_nested_approved_suffixes() {
 
 #[cfg(unix)]
 #[test]
-fn symlinks_are_never_followed_and_are_reported() {
+fn final_component_symlinks_are_never_followed_and_are_reported() {
     use std::os::unix::fs::symlink;
 
     let dir = TempDir::new().unwrap();
@@ -133,6 +133,36 @@ fn symlinks_are_never_followed_and_are_reported() {
     assert_eq!(bundle.files.len(), 1);
     assert_eq!(bundle.coverage.excluded_symlinks, vec!["escape.patch"]);
     assert!(!bundle.files[0].content.contains("must not be read"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_ancestor_is_rejected_without_reading_outside_the_root() {
+    use std::os::unix::fs::symlink;
+
+    let dir = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    init_git(dir.path());
+    write(dir.path(), "PKGBUILD", b"pkgname=demo\n");
+    write(dir.path(), "tracked/inside.patch", b"tracked content\n");
+    git(dir.path(), &["add", "PKGBUILD", "tracked/inside.patch"]);
+
+    fs::remove_dir_all(dir.path().join("tracked")).unwrap();
+    write(
+        outside.path(),
+        "inside.patch",
+        b"outside secret must not be read\n",
+    );
+    symlink(outside.path(), dir.path().join("tracked")).unwrap();
+
+    let error = DefaultRecipeBundleBuilder
+        .build(dir.path(), "demo", generous_limits())
+        .unwrap_err();
+
+    assert!(
+        error.to_string().contains("ancestor") || error.to_string().contains("symlink"),
+        "unexpected error: {error:#}"
+    );
 }
 
 #[test]

@@ -21,7 +21,6 @@ pub(crate) struct ProviderRequest {
     pub(crate) response_format: ResponseFormat,
     pub(crate) schema: Value,
     pub(crate) max_output_tokens: u32,
-    pub(crate) model: String,
 }
 
 impl ProviderRequest {
@@ -48,7 +47,7 @@ impl ProviderRequest {
             ResponseFormat::JsonObject => json!({"type": "json_object"}),
         };
         serde_json::to_vec(&RequestBody {
-            model: &self.model,
+            model: &self.identity.model_id,
             messages: &self.messages,
             temperature: 0,
             n: 1,
@@ -91,7 +90,6 @@ pub(crate) fn build_request(
         response_format: config.response_format,
         schema,
         max_output_tokens: config.max_output_tokens,
-        model: config.model.clone(),
     })
 }
 

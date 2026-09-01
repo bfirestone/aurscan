@@ -18,7 +18,7 @@ pub struct Analyzer {
 }
 
 pub fn build_analyzer(config: ValidatedLlmConfig) -> anyhow::Result<Analyzer> {
-    Analyzer::with_cache_path(config, RedbAnalysisCache::default_path())
+    Analyzer::with_cache_path(config, RedbAnalysisCache::default_path()?)
 }
 
 impl Analyzer {
@@ -35,19 +35,8 @@ impl Analyzer {
         })
     }
 
-    pub fn config(&self) -> &ValidatedLlmConfig {
-        &self.config
-    }
-
     pub fn analysis_identity(&self, bundle: &RecipeBundle) -> AnalysisIdentity {
         analysis_identity(bundle, &self.config)
-    }
-
-    pub fn encoded_request_bytes(&self, bundle: &RecipeBundle) -> anyhow::Result<usize> {
-        let identity = self.analysis_identity(bundle);
-        Ok(build_request(bundle, &self.config, identity)?
-            .encoded_body()?
-            .len())
     }
 
     pub fn analyze_batch(

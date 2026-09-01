@@ -220,6 +220,34 @@ fn failed_refresh_preserves_the_previous_complete_entry() {
 }
 
 #[test]
+fn mixed_valid_and_invalid_claims_are_displayed_but_never_cached() {
+    let mixed = r#"{"findings":[{"kind":"download_execute","severity":"high","file":"PKGBUILD","start_line":2,"end_line":2,"reason":"Downloads attacker input, executes it as the build user, and permits compromise."},{"kind":"download_execute","severity":"high","file":"missing.patch","start_line":1,"end_line":1,"reason":"References an unavailable attacker path with concrete impact."}]}"#;
+    let server = Server::new(vec![
+        Reply {
+            status: "200 OK",
+            content: mixed,
+            finish_reason: "stop",
+        },
+        Reply {
+            status: "200 OK",
+            content: r#"{"findings":[]}"#,
+            finish_reason: "stop",
+        },
+    ]);
+    let dir = TempDir::new().unwrap();
+    let analyzer = analyzer(&server, &dir);
+
+    let partial = analyzer.analyze_batch(&[bundle("demo")], AnalyzeOptions { refresh: false });
+    let replacement = analyzer.analyze_batch(&[bundle("demo")], AnalyzeOptions { refresh: false });
+
+    server.wait_for_count(2);
+    assert_eq!(partial[0].status, AnalysisStatus::Incomplete);
+    assert_eq!(partial[0].findings.len(), 1);
+    assert_eq!(replacement[0].status, AnalysisStatus::Completed);
+    assert_eq!(replacement[0].source, Some(AnalysisSource::Provider));
+}
+
+#[test]
 fn malformed_and_partial_responses_are_never_written() {
     let valid = r#"{"findings":[{"kind":"download_execute","severity":"high","file":"PKGBUILD","start_line":2,"end_line":2,"reason":"Downloads attacker input, executes it as the build user, and permits compromise."}]}"#;
     for invalid in [
