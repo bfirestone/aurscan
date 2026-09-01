@@ -232,15 +232,16 @@ fn is_literal_loopback(host: Host<&str>) -> bool {
 }
 
 fn has_permitted_http_authority(configured_endpoint: &str) -> bool {
+    if configured_endpoint.contains('\\') {
+        return false;
+    }
     let Some((scheme, remainder)) = configured_endpoint.split_once("://") else {
         return false;
     };
     if !scheme.eq_ignore_ascii_case("http") {
         return false;
     }
-    let authority_end = remainder
-        .find(['/', '?', '#', '\\'])
-        .unwrap_or(remainder.len());
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
     let authority = &remainder[..authority_end];
     if authority.is_empty() || authority.contains('@') {
         return false;

@@ -114,6 +114,15 @@ fn http_loopback_requires_an_unambiguous_configured_authority() {
         ("http://127.0.0x0.1/v1", false),
         ("http://user@127.0.0.1/v1", false),
         ("http://127.0.0.1:65536/v1", false),
+        ("http://localhost\\@evil.example", false),
+        ("http://localhost/v1\\@evil.example", false),
+        ("http://127.1.2.3\\@evil.example", false),
+        ("http://127.1.2.3/v1\\@evil.example", false),
+        ("http://[::1]\\@evil.example", false),
+        ("http://[::1]/v1\\@evil.example", false),
+        ("http://user@localhost/v1", false),
+        ("http://user@127.1.2.3/v1", false),
+        ("http://user@[::1]/v1", false),
         ("http://127.0.0.1/v1", true),
         ("http://127.1.2.3:11434/v1", true),
         ("http://127.255.255.255:1/v1", true),
@@ -121,6 +130,9 @@ fn http_loopback_requires_an_unambiguous_configured_authority() {
         ("http://LOCALHOST:11434/v1", true),
         ("http://[::1]/v1", true),
         ("http://[::1]:11434/v1", true),
+        ("http://localhost/@evil.example/v1", true),
+        ("http://127.1.2.3/@evil.example/v1", true),
+        ("http://[::1]/@evil.example/v1", true),
     ];
 
     for (endpoint, accepted) in cases {
