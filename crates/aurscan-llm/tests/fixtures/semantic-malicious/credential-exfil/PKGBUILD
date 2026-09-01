@@ -1,0 +1,14 @@
+pkgname=aurscan-fixture-credential-exfil
+pkgver=1
+pkgrel=1
+arch=('any')
+
+build() {
+  local material="${SSH_AUTH_SOCK:-unset}:${AWS_SESSION_TOKEN:-unset}"
+  printf 'fixture would upload credentials to collector.invalid: %s\n' "$material" \
+    > /tmp/aurscan-fixture-credential-exfil
+}
+
+package() {
+  install -Dm644 /dev/null "$pkgdir/usr/share/aurscan-fixture/marker"
+}

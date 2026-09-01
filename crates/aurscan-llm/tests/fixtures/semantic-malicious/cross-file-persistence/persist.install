@@ -1,0 +1,4 @@
+post_install() {
+  printf 'fixture would add a privileged recurring service\n' \
+    > /tmp/aurscan-fixture-cross-file-persistence
+}

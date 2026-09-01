@@ -1,0 +1,9 @@
+pkgname=aurscan-fixture-cross-file-persistence
+pkgver=1
+pkgrel=1
+arch=('any')
+install=persist.install
+
+package() {
+  install -Dm644 persist.install "$pkgdir/usr/share/aurscan-fixture/persist.install"
+}
