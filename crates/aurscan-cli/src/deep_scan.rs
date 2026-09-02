@@ -270,6 +270,10 @@ pub(crate) fn collect(
 }
 
 fn collect_groups(targets: &[String]) -> anyhow::Result<BTreeMap<String, PackageGroup>> {
+    if targets.iter().any(String::is_empty) {
+        anyhow::bail!("target must not be empty");
+    }
+
     let mut local_directories = Vec::new();
     let mut names = Vec::new();
     for target in targets {
@@ -951,6 +955,16 @@ mod tests {
             root: fetch::SecureRoot::open_local_directory(path).unwrap(),
             target: path.to_path_buf(),
         }
+    }
+
+    #[test]
+    fn collect_groups_rejects_empty_targets_before_local_or_aur_resolution() {
+        let error = match collect_groups(&[String::new()]) {
+            Ok(_) => panic!("an empty target must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(format!("{error:#}").contains("target must not be empty"));
     }
 
     #[test]

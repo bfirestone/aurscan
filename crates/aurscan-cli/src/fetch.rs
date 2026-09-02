@@ -667,6 +667,13 @@ impl SecureRoot {
     /// directory for callers that use its procfs path while retaining `self`.
     #[cfg(target_os = "linux")]
     pub(crate) fn open_local_directory(target: &Path) -> Result<Self, SecureOpenError> {
+        if target.as_os_str().is_empty() {
+            return Err(SecureOpenError::FinalComponent(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path is empty",
+            )));
+        }
+
         let mut directory = if target.is_absolute() {
             OpenOptions::new()
                 .read(true)
@@ -1565,6 +1572,28 @@ mod tests {
             std::fs::read_to_string(opened.proc_path().join("PKGBUILD")).unwrap(),
             "pkgname=original\n"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_target_rejects_empty_paths_and_accepts_explicit_directory_targets() {
+        assert!(matches!(
+            SecureRoot::open_local_directory(Path::new("")),
+            Err(SecureOpenError::FinalComponent(error))
+                if error.kind() == std::io::ErrorKind::InvalidInput
+        ));
+
+        for target in [Path::new("."), Path::new("./"), Path::new("src")] {
+            assert!(
+                SecureRoot::open_local_directory(target).is_ok(),
+                "{} should remain a valid local directory target",
+                target.display()
+            );
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let absolute = directory.path().canonicalize().unwrap();
+        assert!(SecureRoot::open_local_directory(&absolute).is_ok());
     }
 
     #[cfg(target_os = "linux")]
