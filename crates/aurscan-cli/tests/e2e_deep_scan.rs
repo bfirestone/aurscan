@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -27,6 +27,7 @@ struct FakeServer {
     origin: String,
     address: std::net::SocketAddr,
     requests: Arc<AtomicUsize>,
+    connections: Arc<AtomicUsize>,
     captured_headers: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
     captured_bodies: Arc<Mutex<Vec<Vec<u8>>>>,
     captured_request_lines: Arc<Mutex<Vec<String>>>,
@@ -41,6 +42,7 @@ impl FakeServer {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback fake server");
         let address = listener.local_addr().expect("fake server address");
         let requests = Arc::new(AtomicUsize::new(0));
+        let connections = Arc::new(AtomicUsize::new(0));
         let captured_headers = Arc::new(Mutex::new(Vec::new()));
         let captured_bodies = Arc::new(Mutex::new(Vec::new()));
         let captured_request_lines = Arc::new(Mutex::new(Vec::new()));
@@ -49,6 +51,7 @@ impl FakeServer {
         let stopping = Arc::new(AtomicBool::new(false));
 
         let worker_requests = Arc::clone(&requests);
+        let worker_connections = Arc::clone(&connections);
         let worker_headers = Arc::clone(&captured_headers);
         let worker_bodies = Arc::clone(&captured_bodies);
         let worker_request_lines = Arc::clone(&captured_request_lines);
@@ -69,6 +72,7 @@ impl FakeServer {
             if worker_stopping.load(Ordering::Acquire) {
                 break;
             }
+            worker_connections.fetch_add(1, Ordering::SeqCst);
 
             match read_http_request(&mut stream) {
                 Ok((request_line, headers, body)) => {
@@ -127,6 +131,7 @@ impl FakeServer {
             origin: format!("http://{address}"),
             address,
             requests,
+            connections,
             captured_headers,
             captured_bodies,
             captured_request_lines,
@@ -157,6 +162,10 @@ impl FakeServer {
 
     fn request_count(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
+    }
+
+    fn connection_count(&self) -> usize {
+        self.connections.load(Ordering::SeqCst)
     }
 
     fn captured_headers(&self) -> Vec<BTreeMap<String, String>> {
@@ -209,7 +218,7 @@ impl Drop for FakeServer {
 fn read_http_request(
     stream: &mut TcpStream,
 ) -> std::io::Result<(String, BTreeMap<String, String>, Vec<u8>)> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
     let mut received = Vec::new();
     let header_end = loop {
         if let Some(index) = find_bytes(&received, b"\r\n\r\n") {
@@ -372,11 +381,7 @@ impl TestEnv {
         self.write_config(&self.server.endpoint(), model, key_env, extra);
     }
 
-    fn run(&self, args: &[&str]) -> Output {
-        self.run_with_key(args, None)
-    }
-
-    fn run_with_key(&self, args: &[&str], key: Option<(&str, &str)>) -> Output {
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_aurscan"));
         command
             .env_clear()
@@ -390,10 +395,44 @@ impl TestEnv {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_OPTIONAL_LOCKS", "0")
             .args(args);
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.run_with_key(args, None)
+    }
+
+    fn run_with_key(&self, args: &[&str], key: Option<(&str, &str)>) -> Output {
+        let mut command = self.command(args);
         if let Some((name, value)) = key {
             command.env(name, value);
         }
         command.output().expect("launch compiled aurscan binary")
+    }
+
+    fn run_with_path(&self, args: &[&str], path: &Path) -> Output {
+        self.command(args)
+            .env("PATH", path)
+            .output()
+            .expect("launch compiled aurscan binary with isolated PATH")
+    }
+
+    fn run_with_stdin_and_path(&self, args: &[&str], input: &str, path: &Path) -> Output {
+        let mut child = self
+            .command(args)
+            .env("PATH", path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("launch compiled aurscan binary with controlled stdin");
+        child
+            .stdin
+            .take()
+            .expect("child stdin")
+            .write_all(input.as_bytes())
+            .expect("write child stdin");
+        child.wait_with_output().expect("wait for aurscan binary")
     }
 
     fn cache_file(&self) -> PathBuf {
@@ -445,7 +484,7 @@ fn git(directory: &Path, args: &[&str]) {
             "-c",
             "user.name=aurscan e2e",
             "-c",
-            "user.email=aurscan-e2e@example.invalid",
+            "user.email=aurscan-e2e@localhost",
             "-C",
         ])
         .arg(directory.as_os_str())
@@ -545,6 +584,23 @@ fn acknowledged_keys(path: &Path) -> Vec<String> {
         .collect()
 }
 
+fn assert_llm_unused(env: &TestEnv, command: &str) {
+    assert_eq!(
+        env.server.request_count(),
+        0,
+        "plain command {command} contacted the LLM provider"
+    );
+    assert_eq!(
+        env.server.connection_count(),
+        0,
+        "plain command {command} connected to the LLM provider"
+    );
+    assert!(
+        !env.cache_file().exists(),
+        "plain command {command} created LLM cache state"
+    );
+}
+
 #[test]
 fn deep_scan_requires_explicit_config_before_target_work() {
     let env = TestEnv::new();
@@ -594,11 +650,6 @@ fn deep_scan_sends_raw_file_message_and_returns_grounded_advisory() {
     );
 
     assert_exit(&output, 1);
-    assert_ne!(
-        output_code(&output),
-        2,
-        "LLM findings have an Advisory ceiling"
-    );
     let report = parse_stdout_json(&output);
     let package = &report["packages"][0];
     let finding = &package["findings"][0];
@@ -713,6 +764,18 @@ fn deep_scan_cache_hit_needs_no_key_or_provider() {
         "provider"
     );
     assert_eq!(env.server.request_count(), 1);
+
+    let observed_hit = env.run(&["--json", "deep-scan", &target]);
+    assert_exit(&observed_hit, 0);
+    let observed_json = parse_stdout_json(&observed_hit);
+    assert_eq!(
+        observed_json["packages"][0]["analysis"]["status"],
+        "completed"
+    );
+    assert_eq!(observed_json["packages"][0]["analysis"]["source"], "cache");
+    assert_eq!(env.server.request_count(), 1);
+    assert_eq!(env.server.connection_count(), 1);
+
     env.server.stop();
     env.server.assert_healthy();
 
@@ -734,6 +797,7 @@ fn deep_scan_cache_hit_needs_no_key_or_provider() {
     assert!(!rendered.contains("model clean"));
     assert!(!rendered.contains("model safe"));
     assert_eq!(env.server.request_count(), 1);
+    assert_eq!(env.server.connection_count(), 1);
 }
 
 #[test]
@@ -921,6 +985,36 @@ fn invalid_mixed_and_truncated_responses_exit_three_and_do_not_cache() {
 }
 
 #[test]
+fn provider_http_errors_are_unavailable_and_never_cached() {
+    let env = TestEnv::new();
+    env.write_local_config("provider-error-model", None, "");
+    let target = env.build_dir.to_string_lossy().into_owned();
+
+    for (repeat, status) in [500_u16, 503].into_iter().enumerate() {
+        env.server
+            .queue_raw(status, json!({"error": "provider unavailable"}).to_string());
+        let output = env.run(&["--json", "deep-scan", &target]);
+
+        assert_exit(&output, 3);
+        let report = parse_stdout_json(&output);
+        assert_eq!(
+            report["packages"][0]["analysis"]["status"], "unavailable",
+            "HTTP {status}, repeat {repeat}"
+        );
+        assert_eq!(
+            report["packages"][0]["analysis"]["source"], "provider",
+            "HTTP {status}, repeat {repeat} must not be a cache hit"
+        );
+        assert_eq!(
+            env.server.request_count(),
+            repeat + 1,
+            "HTTP {status} must issue exactly one new provider request"
+        );
+    }
+    env.server.assert_healthy();
+}
+
+#[test]
 fn request_cap_preflight_sends_nothing() {
     let env = TestEnv::new();
     env.write_local_config("cap-model", None, "max_requests_per_run = 1");
@@ -952,39 +1046,72 @@ fn request_cap_preflight_sends_nothing() {
 
 #[test]
 fn plain_commands_never_contact_llm() {
+    const ABSENT_API_KEY_ENV: &str = "AURSCAN_E2E_DELIBERATELY_ABSENT_KEY";
     let env = TestEnv::new();
-    env.write_local_config("must-remain-unused", None, "");
+    env.write_local_config("must-remain-unused", Some(ABSENT_API_KEY_ENV), "");
     let target = env.build_dir.to_string_lossy().into_owned();
+    let fake_path = env
+        .home
+        .parent()
+        .expect("home has temporary parent")
+        .join("fake-path");
+    std::fs::create_dir(&fake_path).expect("create empty isolated PATH");
 
-    let check = env.run(&["--no-color", "check", &target]);
+    let check = env.run_with_path(&["--no-color", "check", &target], &fake_path);
     assert_exit(&check, 0);
-    assert_eq!(env.server.request_count(), 0);
+    assert_llm_unused(&env, "check");
 
-    let ack = env.run(&["--no-color", "ack", "--yes", &target]);
+    let check_hook = env.run_with_path(&["--no-color", "check", "--hook", &target], &fake_path);
+    assert_exit(&check_hook, 0);
+    assert_llm_unused(&env, "check --hook");
+
+    let ack = env.run_with_path(&["--no-color", "ack", "--yes", &target], &fake_path);
     assert_exit(&ack, 0);
     assert!(all_output(&ack).contains("nothing to acknowledge"));
-    assert_eq!(env.server.request_count(), 0);
+    assert_llm_unused(&env, "ack --yes");
 
     let bad_archive = env.home.join("expected-local-error.pkg.tar.zst");
     std::fs::write(&bad_archive, b"not a package archive").unwrap();
     let archive = bad_archive.to_string_lossy().into_owned();
-    let artifact = env.run(&["--no-color", "scan-artifact", &archive]);
+    let artifact = env.run_with_path(&["--no-color", "scan-artifact", &archive], &fake_path);
     assert_exit(&artifact, 0);
     assert!(
         all_output(&artifact).contains("could not be scanned"),
         "expected the deterministic local archive error path:\n{}",
         all_output(&artifact)
     );
-    assert_eq!(env.server.request_count(), 0);
+    assert_llm_unused(&env, "scan-artifact");
 
-    let setup = env.run(&["--no-color", "setup", "--check"]);
+    let artifact_hook = env.run_with_stdin_and_path(
+        &["--no-color", "scan-artifact", "--hook"],
+        &format!("{archive}\n"),
+        &fake_path,
+    );
+    assert_exit(&artifact_hook, 0);
+    assert!(
+        all_output(&artifact_hook).contains("could not be scanned"),
+        "expected the deterministic local artifact-hook error path:\n{}",
+        all_output(&artifact_hook)
+    );
+    assert_llm_unused(&env, "scan-artifact --hook");
+
+    let install = env.run_with_path(&["--no-color", "install"], &fake_path);
+    assert_exit(&install, 3);
+    assert!(
+        stderr(&install).contains("failed to launch paru"),
+        "expected fake-PATH install error:\n{}",
+        all_output(&install)
+    );
+    assert_llm_unused(&env, "install");
+
+    let setup = env.run_with_path(&["--no-color", "setup", "--check"], &fake_path);
     assert!(
         matches!(output_code(&setup), 0 | 1),
         "setup --check returned unexpected code {}:\n{}",
         output_code(&setup),
         all_output(&setup)
     );
-    assert_eq!(env.server.request_count(), 0);
+    assert_llm_unused(&env, "setup --check");
     env.server.assert_healthy();
 }
 
@@ -1035,12 +1162,6 @@ fn ack_llm_persists_only_complete_live_findings() {
         "suppression should use the cache"
     );
 
-    std::fs::write(
-        recipe.join("PKGBUILD"),
-        format!("{DEFAULT_PKGBUILD}# second relative path\n"),
-    )
-    .unwrap();
-    commit_recipe(&recipe, "select second relative path");
     env.server.queue_completion(
         &findings_content(vec![candidate(
             "build_install_boundary",
@@ -1052,6 +1173,18 @@ fn ack_llm_persists_only_complete_live_findings() {
         )]),
         "stop",
     );
+    let refreshed = env.run(&["--json", "deep-scan", "--refresh", &target]);
+    assert_exit(&refreshed, 1);
+    let refreshed_report = parse_stdout_json(&refreshed);
+    assert_eq!(
+        refreshed_report["packages"][0]["analysis"]["source"],
+        "provider"
+    );
+    assert_eq!(
+        refreshed_report["packages"][0]["findings"][0]["evidence"]["location"],
+        "helpers/two/install.sh:1"
+    );
+    assert_eq!(env.server.request_count(), 2);
 
     let second_ack = env.run(&["--no-color", "ack", "--llm", "--yes", &target]);
     assert_exit(&second_ack, 0);
@@ -1059,7 +1192,16 @@ fn ack_llm_persists_only_complete_live_findings() {
     let second_keys = acknowledged_keys(&env.ack_file());
     assert_eq!(second_keys.len(), 2);
     assert_ne!(second_keys[0], second_keys[1]);
-    assert_eq!(env.server.request_count(), 2);
+    assert_eq!(
+        env.server.request_count(),
+        2,
+        "ack must use the refreshed cache"
+    );
+    let request_bodies = env.server.captured_bodies();
+    assert_eq!(
+        request_bodies[0], request_bodies[1],
+        "path identity must change without changing content, model, or bundle identity"
+    );
     env.server.assert_healthy();
 }
 
@@ -1164,35 +1306,47 @@ fn terminal_output_escapes_untrusted_controls() {
 fn remote_consent_fails_before_request() {
     let env = TestEnv::new();
     let target = env.build_dir.to_string_lossy().into_owned();
+    let observer_port = env.server.address.port();
+    // IPv4-mapped loopback routes only to this local observer, while the
+    // endpoint policy intentionally does not classify it as literal loopback.
+    let mapped_http = format!("http://[::ffff:127.0.0.1]:{observer_port}/v1");
+    let mapped_https = format!("https://[::ffff:127.0.0.1]:{observer_port}/v1");
 
     env.write_config(
-        "http://192.0.2.1/v1",
+        &mapped_http,
         "remote-model",
         None,
-        "allow_remote = false",
+        "allow_remote = false\ntimeout_seconds = 1",
     );
     let insecure_remote = env.run(&["deep-scan", &target]);
     assert_exit(&insecure_remote, 3);
     assert!(stderr(&insecure_remote).contains("HTTP LLM endpoint requires localhost"));
     assert_eq!(env.server.request_count(), 0);
+    assert_eq!(env.server.connection_count(), 0);
 
     env.write_config(
-        "https://example.invalid/v1",
+        &mapped_https,
         "remote-model",
         None,
-        "allow_remote = false",
+        "allow_remote = false\ntimeout_seconds = 1",
     );
     let no_consent = env.run(&["deep-scan", &target]);
     assert_exit(&no_consent, 3);
     assert!(stderr(&no_consent).contains("requires allow_remote=true"));
     assert_eq!(env.server.request_count(), 0);
+    assert_eq!(env.server.connection_count(), 0);
 
-    env.write_local_config("loopback-model", None, "allow_remote = false");
+    env.write_local_config(
+        "loopback-model",
+        None,
+        "allow_remote = false\ntimeout_seconds = 1",
+    );
     env.server
         .queue_completion(&findings_content(vec![]), "stop");
     let loopback = env.run(&["--json", "deep-scan", &target]);
     assert_exit(&loopback, 0);
     assert_eq!(env.server.request_count(), 1);
+    assert_eq!(env.server.connection_count(), 1);
     assert_eq!(
         parse_stdout_json(&loopback)["packages"][0]["analysis"]["source"],
         "provider"
