@@ -9,3 +9,6 @@ aurscan-*.tar.gz
 # makepkg build debris (running makepkg -si in the repo root):
 /pkg/
 /src/
+
+# worktrees
+.worktrees
