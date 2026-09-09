@@ -12,3 +12,6 @@ aurscan-*.tar.gz
 
 # worktrees
 .worktrees
+
+# exclude jetbrains
+.idea/
