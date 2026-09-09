@@ -3,7 +3,7 @@ use crate::types::DetectorId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
-    pub content_hash: [u8; 32], // blake3 of target content
+    pub content_hash: [u8; 32], // blake3 of content, target identity, and full scan context
     pub detector: DetectorId,
     pub ruleset_version: u32,
     /// Bumped whenever detector *logic* changes in a way that can alter a

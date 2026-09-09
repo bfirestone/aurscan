@@ -1,0 +1,32 @@
+{
+  "captured": "2026-09-09",
+  "description": "Unmodified Git-tracked packaging inputs copied read-only from local paru clones. Generated build leftovers are modeled by reduced shell snippets in the e2e test, never executed. zfs-dkms had no local generated source tree at capture time.",
+  "packages": [
+    {
+      "package": "zfs-utils",
+      "version": "2.4.4-1",
+      "repository": "https://aur.archlinux.org/zfs-utils.git",
+      "commit": "c878c355183ca745285d8eaf538b98788e373d3a",
+      "files": {
+        ".SRCINFO": "298487a5b79d3c3fc890ef545d67928bf563839e48a8bf734d3df736b865f604",
+        "PKGBUILD": "3eeab3356ff775d8052f4633e018281c869395b4559aba85dbf2085f326009ed",
+        "zfs-node-permission.conf": "7ad45fd291aa582639725f14d88d7da5bd3d427012b25bddbe917ca6d1a07c1a",
+        "zfs.initcpio.hook": "15b5acea44225b4364ec6472a08d3d48666d241fe84c142e1171cd3b78a5584f",
+        "zfs.initcpio.install": "2f09c742287f4738c7c09a9669f8055cd63d3b9474cd1f6d9447152d11a1b913",
+        "zfs.initcpio.zfsencryptssh.install": "ac9ed396465e26fa6896762c52a93eb7aaf8af6d7b2c69bd826d219ff821b2c9"
+      }
+    },
+    {
+      "package": "zfs-dkms",
+      "version": "2.4.4-1",
+      "repository": "https://aur.archlinux.org/zfs-dkms.git",
+      "commit": "052b457ee3e7b0214249a7a7b29b4100fa93eb74",
+      "files": {
+        ".SRCINFO": "c36a09173e3facade82900e56e4076a19b9005d5e82aa2cbdb741d9981764a44",
+        ".gitignore": "c5979dc94c23c91969a04446eee9d8e42de2cb0f9b5afc936704d09afc30fb9f",
+        "0001-only-build-the-module-in-dkms.conf.patch": "8d5c31f883a906ab42776dcda79b6c89f904d8f356ade0dab5491578a6af55a5",
+        "PKGBUILD": "cde802f490c1a8b52ec33cb17f58f92bab72c61bf70f099828d2bbf614e5d39d"
+      }
+    }
+  ]
+}

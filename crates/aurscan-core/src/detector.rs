@@ -7,7 +7,7 @@ pub struct DetectorResult {
 }
 
 /// Subset of AUR RPC v5 info the detectors consume.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct AurMetadata {
     pub maintainer: Option<String>,
     pub first_submitted: i64, // epoch
@@ -18,6 +18,7 @@ pub struct AurMetadata {
 }
 
 /// Package metadata available to every detector during a scan.
+#[derive(serde::Serialize)]
 pub struct ScanContext {
     pub package: String,
     pub version: String,

