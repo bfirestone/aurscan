@@ -6,10 +6,10 @@ This document describes how `aurscan` integrates with paru (AUR helper) and pacm
 
 `aurscan setup` configures two integration points:
 
-1. **paru PreBuildCommand** — stage 1–2 gate (before PKGBUILD execution)
+1. **paru PreBuildCommand** — stage 1 packaging gate before the build
 2. **pacman hook** (ALPM PreTransaction) — stage 3 gate (before package installation)
 
-Together, they provide defense-in-depth: scanner runs before PKGBUILD code executes (where build-time attacks occur) and again before binaries are installed (catch late-stage modifications).
+Together, they check packaging inputs before the build and built artifacts before installation. These checks do not sandbox the package manager or guarantee that no earlier helper operation has sourced a PKGBUILD.
 
 ## paru PreBuildCommand integration
 
@@ -31,9 +31,7 @@ PreBuildCommand = /usr/bin/aurscan check --hook .
 > v0.1.0 shipped this bug; if you configured it by hand back then, check with
 > `aurscan setup --check`.
 
-The `--hook` flag enables two behaviors:
-1. Stage 1: scan the PKGBUILD + .install scripts in the current directory
-2. Stage 2: run `makepkg --verifysource` (fetches sources, validates checksums, but executes no build code) and scan the fetched sources
+The command scans packaging inputs in the current directory (stage 1). The `--hook` flag changes gating and prompt behavior; it does not fetch sources, invoke `makepkg --verifysource`, or run the source-analysis stage.
 
 If findings Block, `aurscan` exits non-zero and paru aborts the build. If findings are Advisory and stdin is a terminal, the hook asks **Proceed with this build? [y/N]** on stderr — `y` continues, anything else aborts that build. Without a terminal (scripted updates, CI) it prints the findings and continues. See "Advisory findings in hook mode" below.
 
@@ -108,6 +106,46 @@ To silence a reviewed Advisory permanently, run `aurscan ack <package>` (it reso
 `paru -S pkg1 pkg2 pkg3` runs PreBuildCommand per package, but the **first** failure aborts the whole transaction — remaining packages are neither scanned nor built. Verified with `paru -S worktrunk-bin 1password-cli` failing on the first: paru exited 1 and the second package was never touched. This is fail-closed, which is the safe direction, but it is not independent per-package gating.
 
 **`makepkg --verifysource` with VCS sources** (e.g. `-git` packages) fetches without executing the full build. This one is inherited from the original design and has **not** been re-verified empirically; treat it as a design assumption rather than a measured result.
+
+## Scan-input and source-analysis boundary
+
+`aurscan_core::target::scan_input_inventory` is shared by local directory checks,
+the paru hook, and the fetch/scan pipeline. It separates packaging targets,
+explicit materialized source targets, and generated content. It never sources a
+PKGBUILD to discover inputs.
+
+- Root-level `src/` and `pkg/` are excluded from packaging analysis, except for
+  explicitly Git-tracked files. Untracked helpers elsewhere remain eligible.
+- Discovery reads the scan-root Git index, supports `.git` files and linked
+  worktrees, removes ambient Git environment overrides, and prunes `.git`
+  traversal. A repository discovery error is reported instead of silently
+  discarding tracked-file protection. Without Git metadata, conventional build
+  directory exclusions apply.
+- Fetch-supplied URL/VCS source paths are matched by full relative path, so a
+  downloaded `upstream.sh` does not hide `helpers/upstream.sh`. Tracked files and
+  essential packaging files retain packaging checks. Explicit source targets
+  retain source-detector routing even when also scanned as packaging.
+- Fetch discovery's `LocalFile` origin does not establish an upstream download;
+  local helpers keep packaging checks as well as their existing source routing.
+- Generated content is excluded from this packaging stage, not declared safe.
+  Explicit file scans remain available, including files inside `src/` or `pkg/`.
+
+The current source stage runs source-capable detectors on the files supplied by
+the fetch pipeline. It does not reconstruct build execution, recursively unpack
+all source archives, or classify every upstream script's execution context. A
+future source-analysis stage can reuse the inventory boundary without applying
+packaging assumptions to arbitrary generated test/runtime scripts.
+
+Redirect findings distinguish reads from filesystem writes using Bash AST
+operators. Input redirects and descriptor duplication are not writes; output,
+append, clobber, combined output, and read/write redirects retain system-path
+checks. Commands nested inside redirects are still analyzed.
+
+Result-cache identity includes content, target kind/path/source origin or archive
+member, and full package scan context (name, version, AUR metadata), plus ruleset
+version and detector epoch. Identical bytes at a different path or in a different
+package cannot inherit cached evidence or classification. Detector epoch 6
+invalidates earlier results, including the clean-commit fetch ledger.
 
 ## pacman hook integration
 
@@ -188,7 +226,6 @@ User: paru -S firefox aspell-en
 ├─ [paru PreBuildCommand per package]
 │  ├─ firefox: aurscan check --hook .
 │  │  ├─ stage 1: scan PKGBUILD (tree-sitter-bash AST, ioc_tokens, etc.)
-│  │  ├─ stage 2: makepkg --verifysource → scan sources (hash, elf_inspect, etc.)
 │  │  ├─ verdict: clean → continue
 │  │
 │  ├─ aspell-en: aurscan check --hook .
@@ -286,23 +323,22 @@ Acknowledgements auto-expire when the evidence changes (e.g., a URL is fixed, a 
 
 ## Caveats & known limitations
 
-### No interactive prompts in hook mode
+### Advisory prompts in hook mode
 
-Neither PreBuildCommand nor the ALPM hook prompts. Two independent reasons:
-
-1. paru captures the hook's stdout, so it is not a TTY even when run from a terminal (stdin is; stdout is not). aurscan requires both before prompting.
-2. `gate.rs` disables prompting in hook mode outright (`interactive && !hook && tty`), so it would not prompt even with a full TTY.
+The paru hook prompts for advisories when stdin is a terminal; it writes the
+prompt to stderr because paru captures stdout. In unattended mode advisories
+proceed. The ALPM hook does not prompt.
 
 The practical consequence: **Block aborts the build; Advisory prompts [y/N] at a terminal and proceeds unattended.** There is no interactive override for a Block at the hook. Use `aurscan ack <package>` to acknowledge advisories — acks survive version bumps and expire when the matched content changes, or `aurscan install --allow` for a Block you have judged safe.
 
 ### VCS sources (-git packages)
 
-Packages with VCS sources (e.g., `pkgver()` functions that fetch from git) are staged as follows:
-
-- Stage 1: PKGBUILD is scanned (detects malicious `pkgver()` shell code)
-- Stage 2: `makepkg --verifysource` fetches HEAD into `$srcdir/` but does not execute the full build; sources are scanned
-
-This is safe and verified. However, if a VCS package's `pkgver()` function itself is the attack vector (e.g., it downloads an obfuscated binary and executes it), stage 1 heuristics (tree-sitter-bash AST, `elf_inspect` on binary artifacts) may not catch it. Stage 2 scans fetched artifacts; stage 3 scans the built binary. Combined, they reduce the window but do not eliminate it.
+The paru hook scans the PKGBUILD and local packaging helpers. It does not fetch
+or recursively audit VCS source trees. Name-based `check` and `install` use a
+separate fetch pipeline and scan the materialized source files that pipeline
+returns. `makepkg --verifysource` sources PKGBUILD code, so fetching is not an
+execution isolation boundary. Comprehensive, execution-aware upstream source
+analysis remains follow-up work.
 
 ### Recursive dependencies
 
@@ -350,7 +386,7 @@ Remember that paru reads only the **first** config it finds, so a `~/.config/par
 
 ### Prompts don't appear in the hook
 
-Expected — hook mode never prompts. See "No interactive prompts in hook mode" above.
+The paru hook prompts only when stdin is a terminal. The ALPM hook does not prompt. See "Advisory prompts in hook mode" above.
 
 For an interactive flow, use the `aurscan install` wrapper, which runs in the foreground.
 
@@ -368,5 +404,5 @@ This overrides Block verdicts for the named package. It is an explicit allow-lis
 
 - The scanner itself is distributed via the AUR — verify the first install manually (inspect the PKGBUILD source).
 - The hook runs unprivileged for stages 1–3; system audit (stage 4) may require elevated privileges.
-- Cache hit/miss is deterministic (content-addressed); cache contents are not signed but are self-validating via Blake3 hashes.
+- Cache identity hashes content, target identity, and scan context. Cache entries are not signed or authenticated.
 - Acknowledged findings are never silently dropped; they are logged and summarized in text output ("N findings acknowledged").

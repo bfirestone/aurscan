@@ -67,7 +67,10 @@ pub fn run_check(paths: &[String], cfg: &Config) -> anyhow::Result<(Vec<PackageR
     let engine = build_engine(cfg)?;
     let jobs: Vec<PackageJob> = paths
         .iter()
-        .filter_map(|p| build_job(Path::new(p)))
+        .map(|p| build_job(Path::new(p)))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
         .collect();
 
     let mut reports = engine.scan(&jobs);
@@ -82,21 +85,21 @@ pub fn run_check(paths: &[String], cfg: &Config) -> anyhow::Result<(Vec<PackageR
     Ok((reports, code))
 }
 
-fn build_job(path: &Path) -> Option<PackageJob> {
+fn build_job(path: &Path) -> anyhow::Result<Option<PackageJob>> {
     if !path.exists() {
-        return None;
+        return Ok(None);
     }
     let targets = if path.is_dir() {
-        expand_build_dir(path, &[])
+        expand_build_dir(path)?
     } else {
         vec![wrap_file(path)]
     };
-    Some(PackageJob {
+    Ok(Some(PackageJob {
         name: job_name(path),
         version: String::new(),
         aur_meta: None,
         targets,
-    })
+    }))
 }
 
 /// A report name a human can act on. paru's `PreBuildCommand` invokes

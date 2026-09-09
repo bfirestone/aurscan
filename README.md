@@ -1,6 +1,6 @@
 # aurscan
 
-A proactive, high-performance AUR package scanner in Rust that gates the install path before any PKGBUILD executes. Detects both known malware IOCs (legacy incident response) and novel attack patterns (heuristic analysis).
+A proactive, high-performance AUR package scanner in Rust that scans packaging inputs and gates package builds and installation. Detects both known malware IOCs (legacy incident response) and novel attack patterns (heuristic analysis).
 
 > **Bootstrap Trust:** The scanner itself arrives via the AUR — the channel it scans. Verify the first install manually by inspecting this repository and the PKGBUILD source before trusting it.
 
@@ -8,12 +8,12 @@ A proactive, high-performance AUR package scanner in Rust that gates the install
 
 `aurscan` is a four-stage security gate for AUR packages:
 
-1. **Build scripts** — scan PKGBUILD/install-scripts before `makepkg` runs any shell code
+1. **Build scripts** — scan PKGBUILD/install-scripts in the local pre-build gate
 2. **Fetched sources** — inspect archives after download, before build
 3. **Built artifacts** — verify `.pkg.tar.zst` binaries before pacman installs
 4. **System audit** — detect installed compromised packages and host malware traces
 
-Unlike the legacy incident-specific Python tool (`legacy/aurscan.py`, retained for the June 2026 incident), this Rust engine generalizes detection to catch novel attacks, gates proactively (stages 1–2 pre-execution), and integrates natively with paru and pacman.
+Unlike the legacy incident-specific Python tool (`legacy/aurscan.py`, retained for the June 2026 incident), this Rust engine generalizes detection to catch novel attacks, gates builds with packaging checks, and integrates natively with paru and pacman.
 
 ## Install
 
@@ -54,7 +54,7 @@ aurscan setup  # Install the paru.conf snippet and pacman hook
 
 ### `check` — Scan without installing
 
-Scan PKGBUILDs and sources locally (stage 1–2). Paths are scanned directly; package names are resolved via AUR RPC and cloned into a temporary directory.
+Local directory checks scan packaging inputs (stage 1); explicit file paths can be scanned individually. Package names use the fetch pipeline, resolving AUR dependencies and synchronizing clones in paru's cache before scanning packaging and materialized source files.
 
 ```bash
 aurscan check .                    # Scan PKGBUILD in current directory
@@ -62,17 +62,25 @@ aurscan check firefox aspell-en    # Scan two AUR packages by name
 aurscan check --verbose            # Show informational findings
 ```
 
-In **paru-native mode**, paru runs `aurscan check --hook .` automatically before each build, scanning the PKGBUILD paru will actually execute (stage 1) and verified sources (stage 2). If findings block, paru aborts before `makepkg` runs. If findings advise, an interactive prompt offers override (`--allow`).
+In **paru-native mode**, paru runs `aurscan check --hook .` automatically before each build, scanning packaging inputs in that checkout (stage 1). This hook does not fetch sources or invoke `makepkg --verifysource`. Block findings abort; advisories prompt when stdin is a terminal and proceed unattended.
+
+Directory scans exclude untracked content in root-level `src/` and `pkg/`,
+including leftovers from earlier builds. Explicitly Git-tracked packaging files
+inside those trees remain scanned, as do untracked helpers elsewhere. Without a
+scan-root Git repository, conventional build-directory exclusions apply. Git
+metadata discovery failures are reported; `.git` content is never traversed.
+This boundary is shared with the fetch pipeline, which routes known source files
+separately. See [source-analysis boundaries](docs/integration.md#scan-input-and-source-analysis-boundary).
 
 ### `install` — Fetch, scan, gate, then install
 
-Wrapper that resolves the AUR dependency tree, clones packages to paru's cache, scans stages 1–2, then delegates to paru for installation. Records the scanned git commit per package; the ALPM hook (stage 3) re-checks that HEAD matches before allowing install.
+Wrapper that resolves the AUR dependency tree, clones packages to paru's cache, scans stages 1–2, then delegates to paru for installation. Records clean scan identity in a commit ledger for repeat fetches; the ALPM hook (stage 3) separately scans built archives. The fetch step invokes `makepkg --verifysource`, which sources PKGBUILD shell code; it is not a sandbox or a pre-execution guarantee.
 
 ```bash
 aurscan install firefox aspell-en  # Fetch, scan, then `paru -S`
 ```
 
-Secondary UX compared to paru-native mode; primarily useful for scripted/CI workflows. The wrapper gates on findings; once clean, `paru -S` reuses the cached clone and sources (PreBuildCommand re-scan is a warm-cache no-op).
+Secondary UX compared to paru-native mode; primarily useful for scripted/CI workflows. The wrapper gates on findings; once clean, `paru -S` reuses the cached clone and sources (PreBuildCommand re-scans current packaging inputs using cached results only when content, target, and package context match).
 
 ### `scan-artifact` — Scan built packages
 
@@ -107,7 +115,7 @@ aurscan update-lists
 
 ### `setup` — Configure paru integration and install the hook
 
-Add the `PreBuildCommand` line to paru.conf (stage 1–2 gates) and install the pacman hook (stage 3 gates). Idempotent; safe to re-run.
+Add the `PreBuildCommand` line to paru.conf (stage 1 gate) and install the pacman hook (stage 3 gates). Idempotent; safe to re-run.
 
 Use `--yes` to skip the prompt, or `--check` to report whether the gate is actually active without changing anything (exit 1 if it is not). The paru gate lives in per-user config and cannot be enabled by the package installer, so the pacman hook warns on every transaction while it is missing.
 
@@ -121,7 +129,7 @@ sudo aurscan setup  # Required for hook installation
 ```text
 User runs: paru -S firefox
                  ↓
-[paru-native PreBuildCommand] → aurscan check --hook . (stage 1,2)
+[paru-native PreBuildCommand] → aurscan check --hook . (stage 1)
           ↓ if findings → Block
      abort before makepkg
           ↓ if clean/advisory+allowed
@@ -134,7 +142,7 @@ User runs: paru -S firefox
 [pacman -U] → install
 ```
 
-Stages 1 and 2 prevent PKGBUILD code execution. Stage 3 is last-line defense for already-compiled artifacts (protects yay users, catches late-stage modifications). Stage 4 audits the running system.
+The local stage 1 check reads files without sourcing the PKGBUILD. Source scans inspect only the materialized files passed to that stage; they do not audit all upstream code or determine what a build will execute. Stage 3 is last-line defense for already-compiled artifacts (protects yay users, catches late-stage modifications). Stage 4 audits the running system.
 
 ## Detectors
 
@@ -216,7 +224,7 @@ Configuration and state files:
 
 `aurscan setup` configures two integration points:
 
-1. **paru PreBuildCommand** (stage 1–2 gate): paru runs `aurscan check --hook .` before build, scanning the PKGBUILD and verified sources. Non-zero exit aborts paru's build of that package.
+1. **paru PreBuildCommand** (stage 1 gate): paru runs `aurscan check --hook .` before build, scanning packaging inputs. Non-zero exit aborts paru's build of that package.
 2. **pacman hook** (stage 3 gate): `/usr/share/libalpm/hooks/aurscan.hook` runs `aurscan scan-artifact --hook` on PreTransaction, scanning all packages being installed before pacman touches the filesystem.
 
 See `docs/integration.md` for implementation details, TOCTOU mitigation, and caveat notes.

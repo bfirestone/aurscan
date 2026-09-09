@@ -23,7 +23,9 @@
 ///   (.desktop/.json/... produced garbage "opaque blob" findings), and
 ///   `elf_inspect` demotes the fork+connect / mmap+mprotect+dlopen import
 ///   combination to Info (it matches every networked or JIT-ing program).
-pub const DETECTOR_EPOCH: u32 = 5;
+/// - 6: distinguish redirect reads from writes, separate generated build content
+///   from packaging inputs, and bind result caches to target and package context.
+pub const DETECTOR_EPOCH: u32 = 6;
 
 pub mod archive_layout;
 pub mod aur_metadata;

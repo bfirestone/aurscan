@@ -66,7 +66,7 @@ pub fn head_commit(dir: &Path) -> anyhow::Result<String> {
 }
 
 /// Run `makepkg --verifysource --noconfirm` in `dir` (downloads sources,
-/// executes nothing), then list the newly-materialized source files: every
+/// sources the PKGBUILD but does not run build/package functions), then list the source files: every
 /// regular file in `dir` that isn't tracked by git and isn't a build script,
 /// paired with a `SourceOrigin` inferred from `.SRCINFO`'s `source =` lines.
 pub fn verifysource(dir: &Path) -> anyhow::Result<Vec<(PathBuf, SourceOrigin)>> {
