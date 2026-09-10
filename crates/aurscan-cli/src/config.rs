@@ -123,6 +123,7 @@ fn parse_severity(s: &str) -> Severity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aurscan_llm::ChatCompletionsProfile;
 
     #[test]
     fn config_defaults_map_to_high_medium_policy() {
@@ -178,6 +179,14 @@ unexpected = true
 "#;
         assert!(parse_strict_llm(unknown).is_err());
 
+        let unknown_profile = r#"
+[experimental.llm]
+endpoint = "http://localhost:11434/v1"
+model = "pinned"
+request_profile = "future_profile"
+"#;
+        assert!(parse_strict_llm(unknown_profile).is_err());
+
         let invalid_remote = r#"
 [experimental.llm]
 endpoint = "https://example.com/v1"
@@ -206,6 +215,7 @@ scan_threads = 7
 [experimental.llm]
 endpoint = "http://127.0.0.1:11434/v1"
 model = "pinned"
+request_profile = "openai_reasoning_none"
 "#,
         )
         .unwrap();
@@ -215,5 +225,9 @@ model = "pinned"
         assert_eq!(strict.config.scan_threads, 7);
         assert_eq!(strict.llm.endpoint_origin(), "http://127.0.0.1:11434");
         assert_eq!(strict.llm.model(), "pinned");
+        assert_eq!(
+            strict.llm.request_profile(),
+            ChatCompletionsProfile::OpenAiReasoningNone
+        );
     }
 }

@@ -3,10 +3,11 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const PROVIDER_PROTOCOL_VERSION: u16 = 1;
-pub const PROMPT_VERSION: u32 = 1;
+pub const PROMPT_VERSION: u32 = 2;
 pub const RESPONSE_SCHEMA_VERSION: u16 = 1;
 pub const LLM_ANALYSIS_EPOCH: u32 = 1;
 pub const REVIEW_STRATEGY_ID: &str = "findings_first_v1";
+pub const MAX_REASON_BYTES: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -101,11 +102,21 @@ pub enum ResponseFormat {
     JsonObject,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCompletionsProfile {
+    #[default]
+    Standard,
+    #[serde(rename = "openai_reasoning_none")]
+    OpenAiReasoningNone,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
     pub endpoint: String,
     pub model: String,
+    pub request_profile: ChatCompletionsProfile,
     pub response_format: ResponseFormat,
     pub api_key_env: Option<String>,
     pub allow_remote: bool,
@@ -127,6 +138,7 @@ impl Default for LlmConfig {
         Self {
             endpoint: String::new(),
             model: String::new(),
+            request_profile: ChatCompletionsProfile::Standard,
             response_format: ResponseFormat::JsonSchema,
             api_key_env: None,
             allow_remote: false,

@@ -5,8 +5,9 @@ use crate::prompt::{build_request, prompt_hash, response_schema_hash, ProviderRe
 use crate::provider::{load_api_key, ModelProvider, OpenAiCompatibleProvider};
 use crate::types::{
     AnalysisIdentity, AnalysisOutcome, AnalysisSource, AnalysisStatus, AnalyzeOptions,
-    PackageAnalyzer, RecipeBundle, RequestPreflight, LLM_ANALYSIS_EPOCH, PROMPT_VERSION,
-    PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
+    ChatCompletionsProfile, PackageAnalyzer, RecipeBundle, RequestPreflight, LLM_ANALYSIS_EPOCH,
+    MAX_REASON_BYTES, PROMPT_VERSION, PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION,
+    REVIEW_STRATEGY_ID,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -338,11 +339,18 @@ fn request_profile_fingerprint(config: &ValidatedLlmConfig) -> [u8; 32] {
     hasher.update(&(config.max_findings as u64).to_le_bytes());
     hasher.update(&(config.max_evidence_lines as u64).to_le_bytes());
     hasher.update(&(config.max_excerpt_bytes as u64).to_le_bytes());
-    append_framed(&mut hasher, b"temperature=0");
-    append_framed(&mut hasher, b"n=1");
-    append_framed(&mut hasher, b"max_tokens");
+    let request_semantics: &[u8] = match config.request_profile {
+        ChatCompletionsProfile::Standard => {
+            b"profile=standard; token_field=max_tokens; reasoning=omitted; temperature=0; n=1"
+        }
+        ChatCompletionsProfile::OpenAiReasoningNone => b"profile=openai_reasoning_none; token_field=max_completion_tokens; reasoning_effort=none; temperature=0; n=1",
+    };
+    append_framed(&mut hasher, request_semantics);
     append_framed(&mut hasher, b"one_raw_user_message_per_file");
-    append_framed(&mut hasher, b"reason_max_bytes=500");
+    append_framed(
+        &mut hasher,
+        format!("reason_max_bytes={MAX_REASON_BYTES}").as_bytes(),
+    );
     *hasher.finalize().as_bytes()
 }
 

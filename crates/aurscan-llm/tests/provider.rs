@@ -1,11 +1,13 @@
 use aurscan_llm::{
-    validate_config, AnalysisStatus, AnalyzeOptions, Analyzer, BundleCoverage, CoverageMode,
-    LlmConfig, RecipeBundle, RecipeFile, ResponseFormat,
+    validate_config, AnalysisStatus, AnalyzeOptions, Analyzer, BundleCoverage,
+    ChatCompletionsProfile, CoverageMode, LlmConfig, RecipeBundle, RecipeFile, ResponseFormat,
 };
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -63,15 +65,33 @@ impl ReceivedRequest {
 struct Server {
     origin: String,
     requests: Receiver<ReceivedRequest>,
+    request_count: Arc<AtomicUsize>,
+    finished: Receiver<()>,
     join: Option<thread::JoinHandle<()>>,
 }
 
 impl Server {
     fn one(status: &str, headers: &[(&str, &str)], body: String) -> Self {
+        Self::one_inner(status, headers, body, false)
+    }
+
+    fn one_with_retry_probe(status: &str, headers: &[(&str, &str)], body: String) -> Self {
+        Self::one_inner(status, headers, body, true)
+    }
+
+    fn one_inner(
+        status: &str,
+        headers: &[(&str, &str)],
+        body: String,
+        probe_for_retry: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let origin = format!("http://{address}");
         let (sender, requests) = mpsc::channel();
+        let (finished_sender, finished) = mpsc::channel();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let thread_request_count = request_count.clone();
         let status = status.to_owned();
         let headers = headers
             .iter()
@@ -80,6 +100,7 @@ impl Server {
         let join = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_request(&mut stream);
+            thread_request_count.fetch_add(1, Ordering::Relaxed);
             sender.send(request).unwrap();
             write!(
                 stream,
@@ -91,16 +112,47 @@ impl Server {
                 write!(stream, "{name}: {value}\r\n").unwrap();
             }
             write!(stream, "\r\n{body}").unwrap();
+            drop(stream);
+
+            if probe_for_retry {
+                listener.set_nonblocking(true).unwrap();
+                let deadline = Instant::now() + Duration::from_millis(300);
+                while Instant::now() < deadline {
+                    match listener.accept() {
+                        Ok((mut retry, _)) => {
+                            let _ = read_request(&mut retry);
+                            thread_request_count.fetch_add(1, Ordering::Relaxed);
+                            write!(
+                                retry,
+                                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            )
+                            .unwrap();
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("retry probe failed: {error}"),
+                    }
+                }
+            }
+            finished_sender.send(()).unwrap();
         });
         Self {
             origin,
             requests,
+            request_count,
+            finished,
             join: Some(join),
         }
     }
 
     fn request(&self) -> ReceivedRequest {
         self.requests.recv_timeout(Duration::from_secs(3)).unwrap()
+    }
+
+    fn assert_request_count(&self, expected: usize) {
+        self.finished.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(self.request_count.load(Ordering::Relaxed), expected);
     }
 }
 
@@ -156,10 +208,21 @@ fn read_request(stream: &mut TcpStream) -> ReceivedRequest {
 }
 
 fn analyzer(server: &Server, dir: &TempDir, format: ResponseFormat, key: Option<&str>) -> Analyzer {
+    analyzer_with_profile(server, dir, format, key, ChatCompletionsProfile::Standard)
+}
+
+fn analyzer_with_profile(
+    server: &Server,
+    dir: &TempDir,
+    format: ResponseFormat,
+    key: Option<&str>,
+    request_profile: ChatCompletionsProfile,
+) -> Analyzer {
     let config = LlmConfig {
         endpoint: format!("{}/v1", server.origin),
         model: "pinned/model".into(),
         response_format: format,
+        request_profile,
         api_key_env: key.map(str::to_owned),
         ..LlmConfig::default()
     };
@@ -172,7 +235,8 @@ fn analyzer(server: &Server, dir: &TempDir, format: ResponseFormat, key: Option<
 
 #[test]
 fn strict_request_has_exact_schema_and_one_verbatim_message_per_file() {
-    let server = Server::one("200 OK", &[], response(r#"{"findings":[]}"#, "stop"));
+    let server =
+        Server::one_with_retry_probe("200 OK", &[], response(r#"{"findings":[]}"#, "stop"));
     let dir = TempDir::new().unwrap();
     let analyzer = analyzer(&server, &dir, ResponseFormat::JsonSchema, None);
 
@@ -187,6 +251,9 @@ fn strict_request_has_exact_schema_and_one_verbatim_message_per_file() {
     assert_eq!(body["temperature"], 0);
     assert_eq!(body["n"], 1);
     assert_eq!(body["max_tokens"], 2048);
+    assert!(body.get("reasoning_effort").is_none());
+    assert!(body.get("max_completion_tokens").is_none());
+    assert_eq!(body.as_object().unwrap().len(), 6);
     assert_eq!(body["messages"].as_array().unwrap().len(), 4);
     assert_eq!(body["messages"][0]["role"], "system");
     let system = body["messages"][0]["content"].as_str().unwrap();
@@ -242,6 +309,139 @@ fn strict_request_has_exact_schema_and_one_verbatim_message_per_file() {
         finding["properties"]["severity"]["enum"],
         json!(["info", "medium", "high", "critical"])
     );
+    server.assert_request_count(1);
+}
+
+#[test]
+fn explicit_reasoning_none_profile_uses_only_modern_token_fields() {
+    let server =
+        Server::one_with_retry_probe("200 OK", &[], response(r#"{"findings":[]}"#, "stop"));
+    let dir = TempDir::new().unwrap();
+    let analyzer = analyzer_with_profile(
+        &server,
+        &dir,
+        ResponseFormat::JsonSchema,
+        None,
+        ChatCompletionsProfile::OpenAiReasoningNone,
+    );
+
+    let outcome = analyzer.analyze_batch(&[bundle()], AnalyzeOptions { refresh: false });
+
+    assert_eq!(outcome[0].status, AnalysisStatus::Completed);
+    let request = server.request();
+    let body: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body["model"], "pinned/model");
+    assert_eq!(body["reasoning_effort"], "none");
+    assert_eq!(body["temperature"], 0);
+    assert_eq!(body["n"], 1);
+    assert_eq!(body["max_completion_tokens"], 2048);
+    assert!(body.get("max_tokens").is_none());
+    assert_eq!(body["messages"].as_array().unwrap().len(), 4);
+    assert_eq!(body["response_format"]["type"], "json_schema");
+    assert_eq!(body.as_object().unwrap().len(), 7);
+    server.assert_request_count(1);
+}
+
+#[test]
+fn modern_profile_non_success_is_unavailable_without_standard_retry() {
+    let server = Server::one_with_retry_probe("429 Too Many Requests", &[], String::new());
+    let dir = TempDir::new().unwrap();
+    let analyzer = analyzer_with_profile(
+        &server,
+        &dir,
+        ResponseFormat::JsonSchema,
+        None,
+        ChatCompletionsProfile::OpenAiReasoningNone,
+    );
+
+    let outcome = analyzer.analyze_batch(&[bundle()], AnalyzeOptions { refresh: false });
+
+    assert_eq!(outcome[0].status, AnalysisStatus::Unavailable);
+    assert!(outcome[0].reason.as_deref().unwrap().contains("429"));
+    let body: Value = serde_json::from_slice(&server.request().body).unwrap();
+    assert_eq!(body["reasoning_effort"], "none");
+    assert_eq!(body["max_completion_tokens"], 2048);
+    assert!(body.get("max_tokens").is_none());
+    server.assert_request_count(1);
+}
+
+#[test]
+fn generated_preamble_exposes_host_bounds_and_changes_request_identity() {
+    let default_server = Server::one("200 OK", &[], response(r#"{"findings":[]}"#, "stop"));
+    let changed_server = Server::one("200 OK", &[], response(r#"{"findings":[]}"#, "stop"));
+    let default_dir = TempDir::new().unwrap();
+    let changed_dir = TempDir::new().unwrap();
+    let default_analyzer = analyzer(
+        &default_server,
+        &default_dir,
+        ResponseFormat::JsonSchema,
+        None,
+    );
+    let changed_config = LlmConfig {
+        endpoint: format!("{}/v1", changed_server.origin),
+        model: "pinned/model".into(),
+        max_findings: 17,
+        max_evidence_lines: 5,
+        ..LlmConfig::default()
+    };
+    let changed_analyzer = Analyzer::with_cache_path(
+        validate_config(&changed_config).unwrap(),
+        changed_dir.path().join("llm.redb"),
+    )
+    .unwrap();
+
+    let default_outcome =
+        default_analyzer.analyze_batch(&[bundle()], AnalyzeOptions { refresh: false });
+    let changed_outcome =
+        changed_analyzer.analyze_batch(&[bundle()], AnalyzeOptions { refresh: false });
+    let default_request = default_server.request();
+    let changed_request = changed_server.request();
+
+    assert_eq!(default_outcome[0].status, AnalysisStatus::Completed);
+    assert_eq!(changed_outcome[0].status, AnalysisStatus::Completed);
+    assert_ne!(default_request.body, changed_request.body);
+    assert_ne!(default_outcome[0].identity, changed_outcome[0].identity);
+    assert_ne!(
+        default_outcome[0]
+            .identity
+            .as_ref()
+            .unwrap()
+            .request_profile_fingerprint,
+        changed_outcome[0]
+            .identity
+            .as_ref()
+            .unwrap()
+            .request_profile_fingerprint
+    );
+
+    let default_body: Value = serde_json::from_slice(&default_request.body).unwrap();
+    let changed_body: Value = serde_json::from_slice(&changed_request.body).unwrap();
+    let default_preamble = default_body["messages"][1]["content"].as_str().unwrap();
+    assert!(default_preamble.contains("Maximum findings: 32"));
+    assert!(default_preamble.contains("Maximum inclusive evidence lines per finding: 8"));
+    assert!(default_preamble.contains("Maximum reason size: 500 UTF-8 bytes"));
+    assert!(
+        default_preamble.contains("Reasons must be one line and contain no control characters.")
+    );
+    let changed_preamble = changed_body["messages"][1]["content"].as_str().unwrap();
+    assert!(changed_preamble.contains("Maximum findings: 17"));
+    assert!(changed_preamble.contains("Maximum inclusive evidence lines per finding: 5"));
+    assert!(changed_preamble.contains("Maximum reason size: 500 UTF-8 bytes"));
+    assert!(
+        changed_preamble.contains("Reasons must be one line and contain no control characters.")
+    );
+
+    for body in [&default_body, &changed_body] {
+        assert_eq!(body["messages"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            body["messages"][2]["content"],
+            "File: PKGBUILD\nLine 1 begins after this header.\npkgname=demo\nprepare() { printf 'raw \\\"text\\\"'; }\n"
+        );
+        assert_eq!(
+            body["messages"][3]["content"],
+            "File: hooks/demo.install\nLine 1 begins after this header.\npost_install() { systemctl enable demo; }\n"
+        );
+    }
 }
 
 #[test]

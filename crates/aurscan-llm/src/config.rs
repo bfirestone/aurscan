@@ -1,4 +1,4 @@
-use crate::types::{BundleLimits, LlmConfig, ResponseFormat};
+use crate::types::{BundleLimits, ChatCompletionsProfile, LlmConfig, ResponseFormat};
 use anyhow::{bail, Context};
 use std::net::IpAddr;
 use std::time::Duration;
@@ -30,6 +30,7 @@ pub struct ValidatedLlmConfig {
     pub(crate) endpoint_origin: String,
     pub(crate) chat_completions_url: Url,
     pub(crate) model: String,
+    pub(crate) request_profile: ChatCompletionsProfile,
     pub(crate) response_format: ResponseFormat,
     pub(crate) api_key_env: Option<String>,
     pub(crate) timeout: Duration,
@@ -60,6 +61,10 @@ impl ValidatedLlmConfig {
 
     pub fn response_format(&self) -> ResponseFormat {
         self.response_format
+    }
+
+    pub fn request_profile(&self) -> ChatCompletionsProfile {
+        self.request_profile
     }
 
     pub fn timeout(&self) -> Duration {
@@ -207,6 +212,7 @@ pub fn validate_config(config: &LlmConfig) -> anyhow::Result<ValidatedLlmConfig>
         endpoint_origin,
         chat_completions_url: endpoint,
         model: config.model.clone(),
+        request_profile: config.request_profile,
         response_format: config.response_format,
         api_key_env: config.api_key_env.clone(),
         timeout: Duration::from_secs(config.timeout_seconds),

@@ -982,7 +982,7 @@ mod tests {
         let text = render_deep_text(&run, &preflight, &AckStore::from_keys([]), false, false);
         assert!(text.contains("LLM provenance"));
         assert!(text.contains("Advisory ceiling"));
-        assert!(text.contains("prompt version=1"));
+        assert!(text.contains("prompt version=2"));
         assert!(text.contains("cache"));
         assert!(text.contains("conservative_local"));
         assert!(text.contains("no accepted LLM findings"));

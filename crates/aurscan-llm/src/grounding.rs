@@ -1,8 +1,6 @@
-use crate::types::{LlmFindingKind, RecipeBundle};
+use crate::types::{LlmFindingKind, RecipeBundle, MAX_REASON_BYTES};
 use aurscan_core::{Confidence, Evidence, Finding, Severity};
 use serde::{Deserialize, Serialize};
-
-const MAX_REASON_BYTES: usize = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -1,6 +1,7 @@
 use aurscan_llm::{
-    AnalysisStatus, BundleLimits, LlmConfig, LlmFindingKind, PackageAnalyzer, RecipeBundleBuilder,
-    ResponseFormat, REVIEW_STRATEGY_ID,
+    AnalysisStatus, BundleLimits, ChatCompletionsProfile, LlmConfig, LlmFindingKind,
+    PackageAnalyzer, RecipeBundleBuilder, ResponseFormat, LLM_ANALYSIS_EPOCH, PROMPT_VERSION,
+    PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
 };
 use std::collections::HashSet;
 
@@ -31,6 +32,7 @@ fn default_limits_are_stable() {
     assert_eq!(limits.max_bundle_bytes, 131_072);
 
     let config = LlmConfig::default();
+    assert_eq!(config.request_profile, ChatCompletionsProfile::Standard);
     assert_eq!(config.response_format, ResponseFormat::JsonSchema);
     assert_eq!(config.timeout_seconds, 90);
     assert_eq!(config.max_output_tokens, 2_048);
@@ -46,8 +48,27 @@ fn default_limits_are_stable() {
 }
 
 #[test]
-fn review_strategy_id_is_stable() {
+fn request_profile_and_versions_are_stable() {
+    assert_eq!(
+        ChatCompletionsProfile::default(),
+        ChatCompletionsProfile::Standard
+    );
+    assert_eq!(
+        serde_json::to_string(&ChatCompletionsProfile::OpenAiReasoningNone).unwrap(),
+        "\"openai_reasoning_none\""
+    );
+    assert_eq!(PROMPT_VERSION, 2);
+    assert_eq!(PROVIDER_PROTOCOL_VERSION, 1);
+    assert_eq!(RESPONSE_SCHEMA_VERSION, 1);
+    assert_eq!(LLM_ANALYSIS_EPOCH, 1);
     assert_eq!(REVIEW_STRATEGY_ID, "findings_first_v1");
+}
+
+#[test]
+fn omitted_request_profile_deserializes_as_standard() {
+    let config: LlmConfig = serde_json::from_str("{}").unwrap();
+
+    assert_eq!(config.request_profile, ChatCompletionsProfile::Standard);
 }
 
 #[test]

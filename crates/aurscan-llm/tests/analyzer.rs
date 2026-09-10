@@ -1,8 +1,8 @@
 use aurscan_llm::{
     validate_config, AnalysisSource, AnalysisStatus, AnalyzeOptions, Analyzer, BundleCoverage,
-    CoverageMode, LlmConfig, RecipeBundle, RecipeFile, RequestPreflight, ResponseFormat,
-    LLM_ANALYSIS_EPOCH, PROMPT_VERSION, PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION,
-    REVIEW_STRATEGY_ID,
+    ChatCompletionsProfile, CoverageMode, LlmConfig, RecipeBundle, RecipeFile, RequestPreflight,
+    ResponseFormat, LLM_ANALYSIS_EPOCH, PROMPT_VERSION, PROVIDER_PROTOCOL_VERSION,
+    RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
 };
 use serde_json::json;
 use std::io::{Read, Write};
@@ -554,7 +554,7 @@ fn identity_covers_all_fixed_versions_bytes_origin_model_and_request_profile() {
     assert_eq!(identity.prompt_version, PROMPT_VERSION);
     assert_ne!(
         identity.prompt_hash,
-        *blake3::hash(include_bytes!("../prompts/v1/system.txt")).as_bytes(),
+        *blake3::hash(include_bytes!("../prompts/v2/system.txt")).as_bytes(),
         "prompt identity must cover the fixed envelope, not only system.txt"
     );
     assert_eq!(identity.response_schema_version, RESPONSE_SCHEMA_VERSION);
@@ -599,6 +599,28 @@ fn identity_covers_all_fixed_versions_bytes_origin_model_and_request_profile() {
             "request profile case {index} did not change identity"
         );
     }
+}
+
+#[test]
+fn explicit_request_profiles_have_distinct_identity_without_protocol_bump() {
+    let bundle = recipe_bundle(16, "profile-identity");
+    let standard_dir = TempDir::new().unwrap();
+    let modern_dir = TempDir::new().unwrap();
+    let standard_config = analyzer_config("http://127.0.0.1:9");
+    let mut modern_config = standard_config.clone();
+    modern_config.request_profile = ChatCompletionsProfile::OpenAiReasoningNone;
+
+    let standard = analyzer_at(standard_config, &standard_dir).analysis_identity(&bundle);
+    let modern = analyzer_at(modern_config, &modern_dir).analysis_identity(&bundle);
+
+    assert_ne!(
+        standard.request_profile_fingerprint,
+        modern.request_profile_fingerprint
+    );
+    assert_eq!(standard.provider_protocol_version, 1);
+    assert_eq!(modern.provider_protocol_version, 1);
+    assert_eq!(standard.prompt_version, 2);
+    assert_eq!(modern.prompt_version, 2);
 }
 
 #[test]
