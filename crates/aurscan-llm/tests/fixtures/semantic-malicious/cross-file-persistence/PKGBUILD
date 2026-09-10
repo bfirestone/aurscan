@@ -5,5 +5,5 @@ arch=('any')
 install=persist.install
 
 package() {
-  install -Dm644 persist.install "$pkgdir/usr/share/aurscan-fixture/persist.install"
+  install -Dm644 /dev/null "$pkgdir/usr/share/aurscan-fixture/marker"
 }

