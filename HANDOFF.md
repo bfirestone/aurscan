@@ -44,9 +44,21 @@ The probe's identity check and pathname unlink remain separate. Every same-accou
 
 The five new offline regressions cover lock release/reacquisition, a regular-file replacement installed before validation, missing entries, symlink/directory rejection, and stale-probe preservation. Independent code and specification reviews accepted the implementation; the isolated evaluator passed all 11 authored tests. The signed implementation commit was pushed and origin synchronization verified before this handoff-only update.
 
-Parent epic `.1.9` remains open. The single owner-approved 17-case `gpt-5.6-sol` / `openai_reasoning_none` preflight ran at `ee6aa25dde3ec9ff5a8ccc41c8a7429e0c23b3e0` and was **rejected**: 1/7 strict semantic hits (6/7 required), 16 completed, 1 incomplete, 16 provider requests and 1 cache hit. Retained-finding grounding was 100%, paired drop 0 points, benign Advisories 0/10, and LLM Blocks 0. Preflight `.1.9.4` and qualification `.1.5` remain blocked. No accepted reference report exists.
+Parent epic `.1.9` remains open. The first owner-approved 17-case `gpt-5.6-sol` / `openai_reasoning_none` preflight ran at `ee6aa25dde3ec9ff5a8ccc41c8a7429e0c23b3e0` and was **rejected**: 1/7 strict semantic hits (6/7 required), 16 completed, 1 incomplete, 16 provider requests and 1 cache hit. Retained-finding grounding was 100%, paired drop 0 points, benign Advisories 0/10, and LLM Blocks 0. Preflight `.1.9.4` and qualification `.1.5` remain blocked. No accepted reference report exists.
 
 The retained private schema1 diagnostic has SHA-256 `5e515899252d2b109fd69cf26eba36e5a181f4da0fd66ba9d96a697feafef378`. It remains unchanged historical evidence. Its incomplete cause was discarded by the old harness and cannot be recovered; old clipped ends must not be relabeled as original citation ends. Four strict misses were matching-kind evidence-start mismatches. The kind-plus-start-line scoring rule and failed completion gate remain unchanged.
+
+### Owner-approved diagnostic verification rerun
+
+The owner subsequently approved exactly one additional calibration to verify the accepted fixes. It ran once at `b0ed849add19089206706aa7a86c3e82a7d990cc`, with unchanged `gpt-5.6-sol` / `openai_reasoning_none`, 17 cases, and frozen scoring. **Diagnostic verification passed; model preflight was rejected again.** This authorization is consumed; no further rerun or qualification occurred.
+
+- Schema2, strict status/candidate/failure accounting, secrecy, current identity/selection, and all seven retained citation bounds passed validation. Root independently rederived strict hits and aggregate metrics.
+- `cross-file-persistence` now reports `evidence_line_limit` at original candidate index `0` (one candidate, zero retained findings). This identifies this rerun's failure; it does not recover the first run's discarded cause or the rejected candidate's exact range.
+- Strict semantic hits: **1/7**, required **6/7**. Completed16, incomplete1, unavailable0; provider requests16, within-run cache hits1. Grounding100%, paired drop0 points, LLM Blocks0. Benign Advisories **1/10** (`brave-bin`), within the allowed maximum. Qualification remains blocked.
+- Fresh analysis-contract hash: `b6d10b35cb93bb470abc0e7ae99223db9a4c1ac759e495827db5c9f0830afb4c`. New private diagnostic SHA-256: `9cb1d6fba9600fbc03ff8c1891638a10ec0dc90165fe575736c5f86741bf3add`. Absolute path and per-case evidence are in Arc `.1.9.4`; local records are under `/tmp/arc-diagnostic-rerun.el6usfd8/`.
+- Fresh contract, formatting, Clippy and workspace gates passed before the run (420 top-level plus one nested test, 3 intentional skips). The completed run exited101 for threshold rejection. Its mode600 diagnostic is retained; prior artifacts, configuration, repository and stashes were unchanged during execution, and the temporary evaluation cache was cleaned. This subsequent handoff edit records the outcome.
+
+Next work is a separate design for the evidence-range and finding-kind mismatches, using the now-observable failure code. Diagnostic fixes remain accepted. Do not relax thresholds, infer rejected citation coordinates, automatically retry, or claim any model is qualified.
 
 ### Diagnostic correction `.1.9.6`
 
@@ -97,7 +109,7 @@ The approved sequence is:
 |---|---|---|---|
 | `aurscan-0qag.01vn62.1.9` | **open** | Remediation epic | Keep open while operational work/T4 remain unresolved |
 | `aurscan-0qag.01vn62.1.9.3` | **closed**, `high-risk` | Correct oracle and land modular promotion harness | Accepted and published at `3807dd4`; dependency satisfied |
-| `aurscan-0qag.01vn62.1.9.4` | **blocked**, `devops` | Rejected paid 17-case promotion preflight | 1/7 strict hits and 1 incomplete; new design and authorization required before another run |
+| `aurscan-0qag.01vn62.1.9.4` | **blocked**, `devops` | Two rejected, separately approved 17-case preflights | Latest: schema2 verified, 1/7 hits and evidence-line-limit incomplete; new design/authorization required |
 | `aurscan-0qag.01vn62.1.9.6` | independently accepted | Diagnostic fidelity and oracle correction | Accepted at `3c255eb`; see Arc for publication and closure evidence |
 | `aurscan-0qag.01vn62.1.5` | blocked, `devops` | One conditional 57-case qualification and accepted report | Depends on `.1.9.4`; do not run |
 | `aurscan-0qag.01vn62.1.7` | **closed**, `docs-only` | Experimental LLM usage documentation | Completed at `ef538d3` |
