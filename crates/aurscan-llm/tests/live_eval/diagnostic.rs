@@ -226,6 +226,7 @@ pub(crate) fn configured_existing_path(variable: &str) -> Result<PathBuf> {
 
 fn state_home() -> Result<PathBuf> {
     let state_home = env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
         .ok_or_else(|| anyhow!("XDG_STATE_HOME or HOME is required for evaluation diagnostics"))?;
@@ -698,6 +699,9 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn identity() -> AnalysisContractIdentity {
         AnalysisContractIdentity {
@@ -873,6 +877,31 @@ mod tests {
                 relative_file.to_owned();
             assert!(validate_report(&unsafe_report).is_err());
         }
+    }
+
+    #[test]
+    fn empty_xdg_state_home_falls_back_to_home_local_state() {
+        let _environment = ENV_LOCK.lock().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let previous_xdg_state_home = env::var_os("XDG_STATE_HOME");
+        let previous_home = env::var_os("HOME");
+        env::set_var("XDG_STATE_HOME", "");
+        env::set_var("HOME", temporary.path());
+
+        let resolved = state_home();
+
+        if let Some(value) = previous_xdg_state_home {
+            env::set_var("XDG_STATE_HOME", value);
+        } else {
+            env::remove_var("XDG_STATE_HOME");
+        }
+        if let Some(value) = previous_home {
+            env::set_var("HOME", value);
+        } else {
+            env::remove_var("HOME");
+        }
+
+        assert_eq!(resolved.unwrap(), temporary.path().join(".local/state"));
     }
 
     #[test]
