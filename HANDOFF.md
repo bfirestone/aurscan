@@ -16,9 +16,10 @@ session's own session ID. Foundation aurscan-0qag.01vn62.1.9.3 is accepted,
 published, and closed at implementation commit 3807dd4 under approved
 plan.056dgb. Read its completion evidence and permanent parent design
 aurscan-0qag.01vn62.1.9, which remains open. Read rejected promotion-preflight task aurscan-0qag.01vn62.1.9.4 and diagnostic
-correction task aurscan-0qag.01vn62.1.9.6. Preflight and qualification remain
-blocked. Another paid calibration requires a new approved design and explicit
-operational authorization; these diagnostic corrections authorize no live run.
+correction task aurscan-0qag.01vn62.1.9.6, then current prompt3 task
+aurscan-0qag.01vn62.1.9.7. The owner's persistent quality goal authorizes bounded
+iteration under the latest stored design. Read the prompt3 status below before
+continuing: live quality remains unverified and failed prompt2 runs remain history.
 ```
 
 Useful commands:
@@ -58,7 +59,7 @@ The owner subsequently approved exactly one additional calibration to verify the
 - Fresh analysis-contract hash: `b6d10b35cb93bb470abc0e7ae99223db9a4c1ac759e495827db5c9f0830afb4c`. New private diagnostic SHA-256: `9cb1d6fba9600fbc03ff8c1891638a10ec0dc90165fe575736c5f86741bf3add`. Absolute path and per-case evidence are in Arc `.1.9.4`; local records are under `/tmp/arc-diagnostic-rerun.el6usfd8/`.
 - Fresh contract, formatting, Clippy and workspace gates passed before the run (420 top-level plus one nested test, 3 intentional skips). The completed run exited101 for threshold rejection. Its mode600 diagnostic is retained; prior artifacts, configuration, repository and stashes were unchanged during execution, and the temporary evaluation cache was cleaned. This subsequent handoff edit records the outcome.
 
-Next work is a separate design for the evidence-range and finding-kind mismatches, using the now-observable failure code. Diagnostic fixes remain accepted. Do not relax thresholds, infer rejected citation coordinates, automatically retry, or claim any model is qualified.
+The subsequent prompt3 design below addresses evidence selection and taxonomy under the owner's persistent quality goal. Diagnostic fixes remain accepted. Do not relax thresholds, infer rejected citation coordinates, automatically retry, or claim any model is qualified.
 
 ### Diagnostic correction `.1.9.6`
 
@@ -68,7 +69,17 @@ New local diagnostics use **schema2** with required `candidate_count` and `failu
 
 The schema-forgery oracle now describes guarded creation/truncation of an empty privileged file under `/etc/cron.d` from `/dev/null`. No functional cron schedule is installed. Fixture bytes, expected kinds, and evidence ranges remain unchanged; the corrected oracle naturally changes oracle and analysis-contract hashes, invalidating old promotion identity. Model response schema1, prompt2, epoch1, profile wire semantics, and thresholds remain unchanged.
 
-Implementation `3c255eb47846de0b903f7ad263482acd5d89fd35` passed independent code review (ADHERENT), specification review (COMPLIANT), and 11 isolated evaluator-authored tests. The orchestrator independently reran the workspace suite. Arc `.1.9.6` records final publication and closure evidence. Another paid calibration requires a new approved design plus explicit owner authorization. Qualification additionally requires a valid passed preflight and separate authorization. New model-facing taxonomy, prompts, model/profile choices, and tuning remain future design work.
+Implementation `3c255eb47846de0b903f7ad263482acd5d89fd35` passed independent code review (ADHERENT), specification review (COMPLIANT), and 11 isolated evaluator-authored tests. The orchestrator independently reran the workspace suite. Arc `.1.9.6` records final publication and closure evidence. These diagnostic fixes did not authorize live operations or model-facing changes. The later prompt3 task and persistent quality goal below supersede that historical stop for their bounded scope.
+
+### Prompt3 precision candidate `.1.9.7`
+
+The owner's persistent quality goal authorizes the bounded prompt3 iteration in the latest stored parent design, including its binding independent critique. Prompt3 defines the eight existing kinds by demonstrated behavior, selects minimally sufficient bounded citations, and distinguishes build/staging destinations from install/runtime effects and staged payload intent. It includes no fixture identifiers, package-name exceptions, oracle ranges, or category priority. Statically recoverable decoded operations remain evidence; unavailable second-stage behavior is not inferred.
+
+Only the prompt selector, envelope hash/version, necessary tests, and current documentation change. Historical v1/v2 prompts and failed diagnostics are preserved. The public Analyzer tests check transmitted v3 bytes, exact manifest/raw-file/schema content and both existing wire profiles, full envelope identity, a persisted prompt2 cache miss, and unchanged prompt3 cache reuse. Offline tests cannot establish model quality. Builder RED tests observed prompt2/version3 mismatches before implementation. The focused 45 tests pass; final offline formatting, warnings-denied locked workspace Clippy, locked workspace tests (421 top-level plus one nested subprocess, 3 intentional ignored tests), and locked build pass. One necessary CLI test-only prompt-version literal was updated after the workspace gate exposed it. Hash comparison confirms 165 other tracked files unchanged. Records are under `/tmp/arc-quality-iteration.55upown6/`; independent implementation acceptance and live quality assessment are still pending.
+
+Prompt3 is **unqualified**. No real provider, user configuration, or credential access occurs in this implementation; offline mock profiles are used only for request-contract tests. The previous failed prompt2 candidates retain their outcomes. Before candidate evaluation, the next stage must freeze an independent holdout contract: provenance, case hashes/labels, inclusion rules, coverage rationale, identity, scoring, and success/failure rules. Include benign hard negatives, staged/cross-file/encoded malicious behavior, independent injection variants, and blinded semantic assessment of kind, reason, severity, prerequisites, and citation support, including Info findings. Keep holdout data outside prompt construction.
+
+The frozen 17-case calibration is a promotion gate; only a pass permits the frozen 57-case qualification under the same identity. They share seven malicious/injection cases and do not establish all-eight-kind coverage or generalization. The benign Advisory metric ignores Info findings, and kind/start-line hits do not establish reason correctness. Passing those gates is necessary; the owner's high-quality completion claim also requires the independent assessment. Record each live stage's scope before invocation, with no retry or profile fallback. Do not repeat an unchanged failed candidate to seek success. A holdout used to diagnose a failure is no longer unseen for the next candidate.
 
 ## Non-Negotiable Product Contracts
 
@@ -80,7 +91,7 @@ Implementation `3c255eb47846de0b903f7ad263482acd5d89fd35` passed independent cod
 - Credentials come only from the configured environment-variable name; never store or print the key.
 - Remote use requires explicit consent and may transmit public recipe bytes plus tracked local modifications.
 - Provider requests are sequential with no retry or profile fallback.
-- Prompt v2, response schema v1, analysis epoch 1, `findings_first_v1`, expected finding kinds, scoring, and frozen release thresholds remain unchanged.
+- Current prompt v3 changes the prompt envelope and cache identity. Response schema v1, analysis epoch 1, `findings_first_v1`, expected finding kinds, scoring, and frozen release thresholds remain unchanged.
 - Upstream-source analysis and the shared Go/Echo cache remain deferred.
 
 ## Approved Design

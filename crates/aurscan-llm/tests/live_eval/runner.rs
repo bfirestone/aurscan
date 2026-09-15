@@ -152,7 +152,7 @@ struct ReferenceCaseResult {
 }
 
 pub(crate) fn offline_contract() -> Result<()> {
-    ensure!(PROMPT_VERSION == 2, "prompt version changed");
+    ensure!(PROMPT_VERSION == 3, "prompt version changed");
     ensure!(
         RESPONSE_SCHEMA_VERSION == 1,
         "response schema version changed"
@@ -1913,7 +1913,7 @@ mod tests {
             model_id: "gpt-5.6-sol".to_owned(),
             request_profile: "openai_reasoning_none".to_owned(),
             request_profile_fingerprint: "11".repeat(32),
-            prompt_version: 2,
+            prompt_version: 3,
             prompt_hash: "22".repeat(32),
             response_schema_version: 1,
             response_schema_hash: "33".repeat(32),

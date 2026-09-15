@@ -215,7 +215,7 @@ Existing command JSON remains backward-compatible. Deep scanning has a separate 
           "mode": "conservative_local"
         },
         "model": "doc-fake-model",
-        "prompt_version": 2,
+        "prompt_version": 3,
         "reason": null,
         "review_strategy_id": "findings_first_v1",
         "source": "provider",
@@ -306,9 +306,13 @@ These controls do not make detection complete. Prompt injection, ambiguous behav
 
 ## Qualification status
 
+The current candidate uses prompt v3, response schema v1, analysis epoch 1, and `findings_first_v1`. Prompt v3 adds general finding-kind definitions, phase-aware staging and payload review, and minimally sufficient bounded citations. Its version and complete envelope hash invalidate prompt v2 cache entries; unchanged v3 requests can reuse completed entries. Request profiles, host grounding, corpus labels, scoring, and thresholds are unchanged. Offline request and cache tests establish these host contracts; prompt v3 has not yet undergone live calibration or qualification.
+
 No tested model currently satisfies the frozen v1 qualification bar. The direct OpenAI `gpt-5.6-sol` example above demonstrates wire compatibility only; it does not say that model is qualified.
 
-The authorized `gpt-5.6-sol` / `openai_reasoning_none` qualification diagnostic completed its run but failed the semantic expected-kind threshold (1 of 7, 14.29%, below the frozen 80% bar). It did not publish an accepted candidate or `crates/aurscan-llm/eval/reference-reports/v1.json`; that file does not exist. This failed diagnostic is evidence that qualification remains open, not accepted reference evidence. The promotion foundation and accepted-model documentation remain unfinished/blocked, and this guide intentionally includes no accepted metrics or reference-report link. No missing LLM finding is clearance.
+The earlier prompt v2 `gpt-5.6-sol` / `openai_reasoning_none` qualification diagnostic completed its run but failed the semantic expected-kind threshold (1 of 7, 14.29%, below the frozen 80% bar). It did not publish an accepted candidate or `crates/aurscan-llm/eval/reference-reports/v1.json`; that file does not exist. This failed diagnostic is evidence that qualification remains open, not accepted reference evidence. The promotion foundation is accepted; subsequent prompt v2 calibrations also failed, so qualification and accepted-model documentation remain blocked. This guide includes no accepted metrics or reference-report link. No missing LLM finding is clearance.
+
+Passing the frozen 17-case calibration and 57-case qualification gates is necessary for acceptance. Those sets share seven malicious/injection cases, including related variants; they do not establish coverage of all eight kinds or generalization. The benign Advisory metric excludes Info findings, and kind/start-line scoring does not prove reason correctness. A high-quality completion claim also requires a separately frozen independent holdout assessment of kind, reason, severity, prerequisites, and citation support, including Info findings and benign hard negatives.
 
 ## Deferred
 

@@ -113,7 +113,7 @@ Each object in `packages` contains:
 | `source` | enum, optional | `provider` for a live request or `cache` for a completed cache hit. It is omitted when no source exists. |
 | `model` | string | Configured model ID, including when analysis could not complete. |
 | `review_strategy_id` | string | V1 is `findings_first_v1`. |
-| `prompt_version` | integer | Prompt envelope version used for identity. |
+| `prompt_version` | integer | Prompt envelope version used for identity (currently `3`; model response schema remains v1). |
 | `bundle_hash` | string or null | Lower-case BLAKE3 hash of the included bundle, or `null` when no bundle identity was available. |
 | `coverage` | object | `mode` (`git_tracked` or `conservative_local`), `included_files`, `excluded_binary_files`, and `excluded_symlinks`. |
 | `usage` | object, optional | Provider-reported `input_tokens` and `output_tokens`; omitted when unavailable. |

@@ -6,7 +6,7 @@ use anyhow::Context;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-pub(crate) const SYSTEM_PROMPT: &str = include_str!("../prompts/v2/system.txt");
+pub(crate) const SYSTEM_PROMPT: &str = include_str!("../prompts/v3/system.txt");
 pub(crate) const RESPONSE_SCHEMA_BYTES: &[u8] =
     include_bytes!("../prompts/v1/response-schema.json");
 const MANIFEST_PREFIX: &str =
@@ -156,7 +156,7 @@ fn manifest(bundle: &RecipeBundle, config: &ValidatedLlmConfig) -> anyhow::Resul
 pub(crate) fn prompt_hash() -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     for fixed in [
-        b"aurscan-prompt-envelope-v2".as_slice(),
+        b"aurscan-prompt-envelope-v3".as_slice(),
         b"message-order:system,manifest,file*",
         b"role:system",
         SYSTEM_PROMPT.as_bytes(),
@@ -206,7 +206,7 @@ mod tests {
     fn prompt_hash_covers_the_complete_fixed_envelope() {
         let mut expected = blake3::Hasher::new();
         for fixed in [
-            b"aurscan-prompt-envelope-v2".as_slice(),
+            b"aurscan-prompt-envelope-v3".as_slice(),
             b"message-order:system,manifest,file*",
             b"role:system",
             super::SYSTEM_PROMPT.as_bytes(),
