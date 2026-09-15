@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 pub(crate) const CORPUS_MANIFEST_PATH: &str = "crates/aurscan-llm/eval/corpus-manifest.json";
 pub(crate) const ORACLE_PATH: &str = "crates/aurscan-llm/eval/ORACLE.md";
@@ -1130,13 +1130,48 @@ fn validate_worktree_mode(path: &Path) -> Result<()> {
     Ok(())
 }
 
+enum GitInvocation<'a> {
+    LsFilesStage { path: &'a str },
+    RevParseHead,
+}
+
+fn run_whitelisted_git(workspace: Option<&Path>, invocation: GitInvocation<'_>) -> Result<Output> {
+    let mut command = Command::new("git");
+    if let Some(workspace) = workspace {
+        command.current_dir(workspace);
+    }
+    match invocation {
+        GitInvocation::LsFilesStage { path } => {
+            command.args(["ls-files", "--stage", "--", path]);
+        }
+        GitInvocation::RevParseHead => {
+            command.args(["rev-parse", "HEAD"]);
+        }
+    }
+    command
+        .output()
+        .context("cannot run whitelisted Git command")
+}
+
+pub(crate) fn git_rev_parse_head() -> Result<String> {
+    let output = run_whitelisted_git(None, GitInvocation::RevParseHead)?;
+    ensure!(output.status.success(), "git rev-parse HEAD failed");
+    let commit = String::from_utf8(output.stdout).context("git rev-parse HEAD was not UTF-8")?;
+    let commit = commit.trim();
+    ensure!(
+        commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "git rev-parse HEAD did not return a full commit ID"
+    );
+    Ok(commit.to_owned())
+}
+
 fn validate_git_modes(workspace: &Path, manifest: &CorpusManifest) -> Result<()> {
     for case in &manifest.cases {
-        let output = Command::new("git")
-            .current_dir(workspace)
-            .args(["ls-files", "--stage", "--", &case.path])
-            .output()
-            .with_context(|| format!("cannot inspect Git mode for corpus case {}", case.id))?;
+        let output = run_whitelisted_git(
+            Some(workspace),
+            GitInvocation::LsFilesStage { path: &case.path },
+        )
+        .with_context(|| format!("cannot inspect Git mode for corpus case {}", case.id))?;
         ensure!(
             output.status.success(),
             "git ls-files failed for corpus case {}",
@@ -1160,6 +1195,7 @@ fn validate_git_modes(workspace: &Path, manifest: &CorpusManifest) -> Result<()>
 }
 
 fn validate_rust_never_executes_fixtures(workspace: &Path) -> Result<()> {
+    let mut constructors = 0;
     for relative in [
         "crates/aurscan-llm/tests/live_eval.rs",
         "crates/aurscan-llm/tests/live_eval/mod.rs",
@@ -1169,19 +1205,47 @@ fn validate_rust_never_executes_fixtures(workspace: &Path) -> Result<()> {
     ] {
         let source = fs::read_to_string(workspace.join(relative))
             .with_context(|| format!("cannot read harness source {relative}"))?;
-        for forbidden in [
-            concat!("Command::new", "(\"bash\")"),
-            concat!("Command::new", "(\"sh\")"),
-            concat!("Command::new", "(\"makepkg\")"),
-            concat!(".arg", "(\"makepkg\")"),
-        ] {
+        constructors += validate_process_launch_source(relative, &source)?;
+    }
+    ensure!(
+        constructors == 1,
+        "harness must contain exactly one centralized process constructor"
+    );
+    Ok(())
+}
+
+fn validate_process_launch_source(relative: &str, source: &str) -> Result<usize> {
+    let is_central_module = relative.ends_with("live_eval/corpus.rs");
+    let allowed_import = ["usestd::pro", "cess::{Command,Output};"].concat();
+    let process_command = ["pro", "cess::Command"].concat();
+    let process_command_group = ["pro", "cess::{Command"].concat();
+    let constructor = ["Command", "::", "new"].concat();
+    let allowed_constructor = ["letmutcommand=Command", "::", "new(\"git\");"].concat();
+    let mut count = 0;
+
+    for line in source.lines() {
+        let compact = line
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        if (compact.starts_with("use") && compact.contains("process"))
+            || compact.contains(&process_command)
+            || compact.contains(&process_command_group)
+        {
             ensure!(
-                !source.contains(forbidden),
-                "harness source {relative} contains fixture execution signature {forbidden}"
+                is_central_module && compact == allowed_import,
+                "harness source {relative} contains a non-whitelisted process import"
             );
         }
+        if compact.contains(&constructor) {
+            ensure!(
+                is_central_module && compact == allowed_constructor,
+                "harness source {relative} contains a non-whitelisted process constructor"
+            );
+            count += 1;
+        }
     }
-    Ok(())
+    Ok(count)
 }
 
 fn validate_pkgbase(pkgbase: &str) -> Result<()> {
@@ -1561,6 +1625,64 @@ mod tests {
         unexpected_file.files.push(extra);
         unexpected_file.coverage.included_files += 1;
         assert!(validate_suspicious_file_set("obfuscated-download", &unexpected_file).is_err());
+    }
+
+    #[test]
+    fn process_launch_validator_rejects_absolute_and_indirect_executables() {
+        let constructor = ["Command", "::", "new"].concat();
+        let absolute_shell = format!("let child = {constructor}(\"/bin/sh\");");
+        let indirect = format!("let child = {constructor}(program_from_fixture);");
+        let aliased_constructor =
+            format!("let launch = {constructor};\nlet child = launch(program_from_fixture);");
+        let whitespace_obscured = [
+            "let child = std :: pro",
+            "cess :: Com",
+            "mand :: new (program_from_fixture);",
+        ]
+        .concat();
+        let aliased_process = ["use std::pro", "cess::Command as FixtureRunner;"].concat();
+        let brace_aliased_process = [
+            "use std::{pro",
+            "cess::Command as FixtureRunner};\n",
+            "let child = FixtureRunner::new(program_from_fixture);",
+        ]
+        .concat();
+        let module_aliased_process = [
+            "use std::pro",
+            "cess as child_pro",
+            "cess;\nuse child_pro",
+            "cess::Command as FixtureRunner;\n",
+            "let child = FixtureRunner::new(program_from_fixture);",
+        ]
+        .concat();
+        for hostile in [
+            absolute_shell,
+            indirect,
+            aliased_constructor,
+            whitespace_obscured,
+            aliased_process,
+            brace_aliased_process,
+            module_aliased_process,
+        ] {
+            assert!(
+                validate_process_launch_source("tests/live_eval/runner.rs", &hostile).is_err(),
+                "accepted process-launch source: {hostile}"
+            );
+        }
+
+        let allowed = [
+            "use std::pro",
+            "cess::{Command, Output};\n",
+            "let mut command = ",
+            "Command",
+            "::",
+            "new(\"git\");",
+        ]
+        .concat();
+        assert_eq!(
+            validate_process_launch_source("tests/live_eval/corpus.rs", &allowed).unwrap(),
+            1
+        );
     }
 
     #[test]

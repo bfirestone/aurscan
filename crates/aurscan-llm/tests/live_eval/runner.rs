@@ -14,7 +14,7 @@ use aurscan_llm::{
     LlmFindingKind, RecipeBundle, RecipeBundleBuilder, TokenUsage, ValidatedLlmConfig,
     LLM_ANALYSIS_EPOCH, PROMPT_VERSION, RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
@@ -22,7 +22,6 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "linux")]
@@ -42,18 +41,6 @@ const INJECTION_THRESHOLD_ID: &str = "paired_injection_delta_percentage_points";
 const BENIGN_THRESHOLD_ID: &str = "benign_unlabelled_advisory_rate";
 const BLOCK_THRESHOLD_ID: &str = "llm_block_count";
 const COMPLETION_THRESHOLD_ID: &str = "unavailable_or_incomplete_count";
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RootConfig {
-    experimental: ExperimentalConfig,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ExperimentalConfig {
-    llm: LlmConfig,
-}
 
 struct EvaluationInput<'a> {
     id: String,
@@ -675,7 +662,7 @@ fn finalize_run(
         RunOutcome::Rejected
     };
     let generated_at = unix_epoch_seconds()?;
-    let git_commit = git_rev_parse_head()?;
+    let git_commit = corpus::git_rev_parse_head()?;
     let report = DiagnosticReport {
         schema_version: 1,
         run_kind,
@@ -1167,9 +1154,20 @@ fn load_config() -> Result<LlmConfig> {
     let config_home = config_home_from(xdg.as_deref(), home.as_deref())?;
     let path = config_home.join("aurscan/config.toml");
     let text = fs::read_to_string(&path).context("cannot read normal XDG aurscan config")?;
-    let root: RootConfig = toml::from_str(&text)
-        .context("normal XDG aurscan config has an invalid experimental.llm section")?;
-    Ok(root.experimental.llm)
+    parse_llm_config(&text)
+}
+
+fn parse_llm_config(text: &str) -> Result<LlmConfig> {
+    let root: toml::Value =
+        toml::from_str(text).map_err(|_| anyhow!("normal XDG aurscan config is invalid TOML"))?;
+    let llm = root
+        .get("experimental")
+        .and_then(toml::Value::as_table)
+        .and_then(|experimental| experimental.get("llm"))
+        .cloned()
+        .ok_or_else(|| anyhow!("normal XDG aurscan config has no experimental.llm section"))?;
+    llm.try_into()
+        .map_err(|_| anyhow!("normal XDG aurscan config has an invalid experimental.llm section"))
 }
 
 fn config_home_from(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf> {
@@ -1260,6 +1258,22 @@ fn normalized_absolute_path(workspace: &Path, path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(not(unix))]
+    length: u64,
+}
+
+#[derive(Debug)]
+struct OwnedCandidate {
+    file: File,
+    identity: FileIdentity,
+}
+
 struct CandidateCleanup {
     output_path: PathBuf,
     directory_path: PathBuf,
@@ -1267,7 +1281,7 @@ struct CandidateCleanup {
     output_name: OsString,
     candidate_name: OsString,
     existing_output: Option<File>,
-    armed: bool,
+    owned_candidate: Option<OwnedCandidate>,
 }
 
 impl CandidateCleanup {
@@ -1283,6 +1297,9 @@ impl CandidateCleanup {
             .parent()
             .ok_or_else(|| anyhow!("reference report path has no parent directory"))?;
         let directory = open_reference_directory_beneath(&canonical_workspace, directory_path)?;
+        directory
+            .try_lock()
+            .context("another reference publication already owns the report directory")?;
         let output_name = output
             .file_name()
             .ok_or_else(|| anyhow!("reference report path has no file name"))?
@@ -1306,7 +1323,7 @@ impl CandidateCleanup {
             output_name,
             candidate_name,
             existing_output,
-            armed: true,
+            owned_candidate: None,
         })
     }
 
@@ -1318,26 +1335,102 @@ impl CandidateCleanup {
         reference_child_path(&self.directory, &self.directory_path, &self.output_name)
     }
 
+    fn create_owned_candidate(&mut self) -> Result<()> {
+        ensure!(
+            self.owned_candidate.is_none(),
+            "reference candidate is already owned"
+        );
+        let file = create_reference_candidate(&self.candidate())?;
+        let identity = file_identity(&file).context("cannot identify owned reference candidate")?;
+        self.owned_candidate = Some(OwnedCandidate { file, identity });
+        Ok(())
+    }
+
+    fn owned_candidate_mut(&mut self) -> Option<&mut File> {
+        self.owned_candidate
+            .as_mut()
+            .map(|candidate| &mut candidate.file)
+    }
+
+    fn candidate_entry_is_owned(&self) -> Result<bool> {
+        let Some(owned) = &self.owned_candidate else {
+            return Ok(false);
+        };
+        ensure!(
+            file_identity(&owned.file)? == owned.identity,
+            "owned reference candidate identity changed"
+        );
+        let Some(current) = open_optional_reference_file(&self.candidate())? else {
+            return Ok(false);
+        };
+        Ok(file_identity(&current)? == owned.identity)
+    }
+
+    fn ensure_candidate_entry_is_owned(&self) -> Result<()> {
+        ensure!(
+            self.candidate_entry_is_owned()?,
+            "reference candidate directory entry no longer matches the owned file"
+        );
+        Ok(())
+    }
+
+    fn remove_owned_candidate(&mut self) -> Result<()> {
+        self.ensure_candidate_entry_is_owned()?;
+        fs::remove_file(self.candidate()).context("cannot remove owned reference candidate")?;
+        self.owned_candidate = None;
+        Ok(())
+    }
+
+    fn ensure_output_entry_is_owned(&self) -> Result<()> {
+        let owned = self
+            .owned_candidate
+            .as_ref()
+            .ok_or_else(|| anyhow!("reference candidate ownership is not armed"))?;
+        let current = open_optional_reference_file(&self.output())?
+            .ok_or_else(|| anyhow!("accepted reference report is missing"))?;
+        ensure!(
+            file_identity(&current)? == owned.identity,
+            "accepted reference report does not match the owned candidate"
+        );
+        Ok(())
+    }
+
     fn disarm(&mut self) {
-        self.armed = false;
+        self.owned_candidate = None;
     }
 }
 
 impl Drop for CandidateCleanup {
     fn drop(&mut self) {
-        if self.armed {
-            match fs::remove_file(self.candidate()) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        if self.owned_candidate.is_none() {
+            return;
+        }
+        match self.candidate_entry_is_owned() {
+            Ok(true) => match fs::remove_file(self.candidate()) {
+                Ok(()) => self.owned_candidate = None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.owned_candidate = None;
+                }
                 Err(error) => eprintln!(
-                    "failed to clean reference candidate {}: {}",
+                    "failed to clean owned reference candidate {}: {}",
                     diagnostic::terminal_escape(&candidate_path(&self.output_path).map_or_else(
                         |_| "<invalid-candidate>".into(),
                         |path| path.to_string_lossy().into_owned()
                     )),
                     diagnostic::terminal_escape(&error.to_string())
                 ),
+            },
+            Ok(false) => {
+                self.owned_candidate = None;
             }
+            Err(error) => eprintln!(
+                "failed to verify owned reference candidate {}: {}",
+                diagnostic::terminal_escape(&candidate_path(&self.output_path).map_or_else(
+                    |_| "<invalid-candidate>".into(),
+                    |path| path.to_string_lossy().into_owned()
+                )),
+                diagnostic::terminal_escape(&error.to_string())
+            ),
         }
     }
 }
@@ -1485,21 +1578,25 @@ fn ensure_reference_final_unchanged(cleanup: &CandidateCleanup) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn same_open_file(left: &File, right: &File) -> Result<()> {
+fn file_identity(file: &File) -> Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    let left = left.metadata()?;
-    let right = right.metadata()?;
-    ensure!(
-        left.dev() == right.dev() && left.ino() == right.ino(),
-        "reference report final file changed during publication"
-    );
-    Ok(())
+    let metadata = file.metadata()?;
+    Ok(FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 #[cfg(not(unix))]
+fn file_identity(file: &File) -> Result<FileIdentity> {
+    Ok(FileIdentity {
+        length: file.metadata()?.len(),
+    })
+}
+
 fn same_open_file(left: &File, right: &File) -> Result<()> {
     ensure!(
-        left.metadata()?.len() == right.metadata()?.len(),
+        file_identity(left)? == file_identity(right)?,
         "reference report final file changed during publication"
     );
     Ok(())
@@ -1510,6 +1607,15 @@ fn write_candidate_and_accept(
     report: &ReferenceReport,
     candidate_cleanup: &mut CandidateCleanup,
 ) -> Result<()> {
+    write_candidate_and_accept_with_hook(output, report, candidate_cleanup, |_| {})
+}
+
+fn write_candidate_and_accept_with_hook(
+    output: &Path,
+    report: &ReferenceReport,
+    candidate_cleanup: &mut CandidateCleanup,
+    after_candidate_sync: impl FnOnce(&Path),
+) -> Result<()> {
     ensure!(
         candidate_cleanup.output_path == output,
         "reference report output path changed"
@@ -1519,32 +1625,37 @@ fn write_candidate_and_accept(
     let mut bytes =
         serde_json::to_vec_pretty(report).context("cannot serialize reference report")?;
     bytes.push(b'\n');
+    candidate_cleanup.create_owned_candidate()?;
+    {
+        let candidate = candidate_cleanup
+            .owned_candidate_mut()
+            .ok_or_else(|| anyhow!("reference candidate ownership was not armed"))?;
+        candidate
+            .write_all(&bytes)
+            .context("cannot write reference report candidate")?;
+        candidate
+            .flush()
+            .context("cannot flush reference report candidate")?;
+        candidate
+            .sync_all()
+            .context("cannot sync reference report candidate")?;
+    }
     let candidate_path = candidate_cleanup.candidate();
-    let mut candidate = create_reference_candidate(&candidate_path)?;
-    candidate
-        .write_all(&bytes)
-        .context("cannot write reference report candidate")?;
-    candidate
-        .flush()
-        .context("cannot flush reference report candidate")?;
-    candidate
-        .sync_all()
-        .context("cannot sync reference report candidate")?;
+    after_candidate_sync(&candidate_path);
 
     let failures = threshold_failures(RunKind::Qualification, &report.metrics);
     if !failures.is_empty() {
-        drop(candidate);
-        fs::remove_file(&candidate_path)
-            .context("cannot remove rejected reference report candidate")?;
+        candidate_cleanup.remove_owned_candidate()?;
         bail!(
             "live evaluation release thresholds failed without accepting a report: {}",
             failures.join(",")
         );
     }
+    candidate_cleanup.ensure_candidate_entry_is_owned()?;
     ensure_reference_final_unchanged(candidate_cleanup)?;
-    drop(candidate);
     fs::rename(&candidate_path, candidate_cleanup.output())
-        .context("cannot atomically accept reference report")?;
+        .context("cannot atomically accept the locked owned reference candidate")?;
+    candidate_cleanup.ensure_output_entry_is_owned()?;
     candidate_cleanup
         .directory
         .sync_all()
@@ -1597,21 +1708,6 @@ fn unix_epoch_seconds() -> Result<u64> {
         .duration_since(UNIX_EPOCH)
         .context("system clock is before the Unix epoch")?
         .as_secs())
-}
-
-fn git_rev_parse_head() -> Result<String> {
-    let output = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .context("cannot run git rev-parse HEAD")?;
-    ensure!(output.status.success(), "git rev-parse HEAD failed");
-    let commit = String::from_utf8(output.stdout).context("git rev-parse HEAD was not UTF-8")?;
-    let commit = commit.trim();
-    ensure!(
-        commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "git rev-parse HEAD did not return a full commit ID"
-    );
-    Ok(commit.to_owned())
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1818,6 +1914,64 @@ mod tests {
         ] {
             assert!(config_home_from(xdg, home).is_err());
         }
+    }
+
+    #[test]
+    fn llm_config_extraction_accepts_ordinary_root_fields_and_sibling_tables() {
+        let config = parse_llm_config(
+            r#"
+color = "auto"
+default_profile = "strict"
+
+[scan]
+fail_on = "high"
+
+[experimental.telemetry]
+enabled = false
+
+[experimental.llm]
+model = "gpt-5.6-sol"
+request_profile = "openai_reasoning_none"
+allow_large_requests = true
+max_requests_per_run = 100
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.model, "gpt-5.6-sol");
+        assert_eq!(
+            config.request_profile,
+            ChatCompletionsProfile::OpenAiReasoningNone
+        );
+        assert!(config.allow_large_requests);
+        assert_eq!(config.max_requests_per_run, 100);
+    }
+
+    #[test]
+    fn llm_config_parse_errors_are_generic_and_never_echo_secret_input() {
+        const SECRET: &str = "AURSCAN_SENTINEL_SUPER_SECRET_47";
+        for malformed in [
+            format!("[experimental.llm]\nmodel = \"gpt-5.6-sol\"\napi_key_env = \"{SECRET}"),
+            format!(
+                "[experimental.llm]\nmodel = \"gpt-5.6-sol\"\napi_key_env = {{ {SECRET} = true }}\n"
+            ),
+        ] {
+            let error = parse_llm_config(&malformed).unwrap_err();
+            let displayed = format!("{error:#}");
+            let debugged = format!("{error:?}");
+            assert!(
+                !displayed.contains(SECRET) && !debugged.contains(SECRET),
+                "secret leaked in display={displayed:?} debug={debugged:?}"
+            );
+        }
+
+        let unknown = parse_llm_config(
+            "[experimental.llm]\nmodel = \"gpt-5.6-sol\"\nunknown_llm_field = true\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            unknown.to_string(),
+            "normal XDG aurscan config has an invalid experimental.llm section"
+        );
     }
 
     #[test]
@@ -2291,5 +2445,58 @@ mod tests {
 
         assert_ne!(fs::read(retained.join("v1.json")).unwrap(), b"existing\n");
         assert!(!outside.path().join("v1.json").exists());
+    }
+
+    #[test]
+    fn candidate_replacement_is_neither_accepted_nor_unlinked() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        fs::write(&output, b"existing\n").unwrap();
+        let mut cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
+        let candidate = candidate_path(&output).unwrap();
+        let result = write_candidate_and_accept_with_hook(
+            &output,
+            &reference_report(passing_metrics()),
+            &mut cleanup,
+            |_| {
+                fs::remove_file(&candidate).unwrap();
+                fs::write(&candidate, b"replacement-candidate\n").unwrap();
+            },
+        );
+        assert!(result.is_err());
+        drop(cleanup);
+        assert_eq!(fs::read(&output).unwrap(), b"existing\n");
+        assert_eq!(fs::read(&candidate).unwrap(), b"replacement-candidate\n");
+    }
+
+    #[test]
+    fn concurrent_publication_run_cannot_delete_or_accept_the_owned_candidate() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().to_path_buf();
+        let output = workspace.join("v1.json");
+        fs::write(&output, b"existing\n").unwrap();
+        let mut first = CandidateCleanup::for_output(&workspace, &output).unwrap();
+        first.create_owned_candidate().unwrap();
+        first
+            .owned_candidate_mut()
+            .unwrap()
+            .write_all(b"first-run-candidate\n")
+            .unwrap();
+        let candidate = candidate_path(&output).unwrap();
+
+        let other_workspace = workspace.clone();
+        let other_output = output.clone();
+        let second = std::thread::spawn(move || {
+            CandidateCleanup::for_output(&other_workspace, &other_output).map(drop)
+        })
+        .join()
+        .unwrap();
+        assert!(second.is_err());
+        assert_eq!(fs::read(&candidate).unwrap(), b"first-run-candidate\n");
+        assert_eq!(fs::read(&output).unwrap(), b"existing\n");
+
+        drop(first);
+        assert!(!candidate.exists());
+        assert_eq!(fs::read(&output).unwrap(), b"existing\n");
     }
 }

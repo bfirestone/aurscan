@@ -1,5 +1,5 @@
 use super::corpus::validate_relative_path;
-use anyhow::{anyhow, bail, ensure, Context, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -16,6 +16,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 
 const DIAGNOSTIC_OUTPUT_ENV: &str = "AURSCAN_LLM_EVAL_DIAGNOSTIC_OUTPUT";
+const MAX_PROMOTION_DIAGNOSTIC_BYTES: u64 = 8 * 1024 * 1024;
 const FORBIDDEN_KEYS: [&str; 11] = [
     "endpoint",
     "api_key",
@@ -150,10 +151,23 @@ pub(crate) struct AnalysisContractIdentity {
 }
 
 #[derive(Debug)]
+struct RetainedDirectoryPath {
+    path: PathBuf,
+    descriptors: Vec<File>,
+}
+
+impl RetainedDirectoryPath {
+    fn directory(&self) -> &File {
+        self.descriptors
+            .last()
+            .expect("an absolute directory walk always retains the root descriptor")
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct PreparedDiagnosticPath {
     path: PathBuf,
-    parent_path: PathBuf,
-    parent: File,
+    parent: RetainedDirectoryPath,
     file_name: OsString,
 }
 
@@ -166,19 +180,35 @@ impl PreparedDiagnosticPath {
 #[derive(Debug)]
 pub(crate) struct OpenedDiagnosticPath {
     path: PathBuf,
-    _parent: File,
+    _parent: RetainedDirectoryPath,
     file: File,
 }
 
 impl OpenedDiagnosticPath {
     pub(crate) fn read_bytes(&mut self) -> Result<Vec<u8>> {
+        let length = self
+            .file
+            .metadata()
+            .context("cannot inspect promotion diagnostic size")?
+            .len();
+        ensure!(
+            length <= MAX_PROMOTION_DIAGNOSTIC_BYTES,
+            "promotion diagnostic exceeds the safe size limit"
+        );
         self.file
             .seek(std::io::SeekFrom::Start(0))
             .context("cannot seek promotion diagnostic")?;
-        let mut bytes = Vec::new();
-        self.file
+        let capacity =
+            usize::try_from(length).context("promotion diagnostic size cannot fit in memory")?;
+        let mut bytes = Vec::with_capacity(capacity);
+        Read::by_ref(&mut self.file)
+            .take(MAX_PROMOTION_DIAGNOSTIC_BYTES + 1)
             .read_to_end(&mut bytes)
             .context("cannot read promotion diagnostic")?;
+        ensure!(
+            bytes.len() as u64 <= MAX_PROMOTION_DIAGNOSTIC_BYTES,
+            "promotion diagnostic grew beyond the safe size limit"
+        );
         Ok(bytes)
     }
 
@@ -284,20 +314,34 @@ pub(crate) fn prepare_new_diagnostic_path(
     state_home: &Path,
     configured: &Path,
 ) -> Result<PreparedDiagnosticPath> {
+    prepare_new_diagnostic_path_inner(state_home, configured, |_| {})
+}
+
+#[cfg(test)]
+fn prepare_new_diagnostic_path_with_hook(
+    state_home: &Path,
+    configured: &Path,
+    hook: impl FnMut(&Path),
+) -> Result<PreparedDiagnosticPath> {
+    prepare_new_diagnostic_path_inner(state_home, configured, hook)
+}
+
+fn prepare_new_diagnostic_path_inner(
+    state_home: &Path,
+    configured: &Path,
+    hook: impl FnMut(&Path),
+) -> Result<PreparedDiagnosticPath> {
     validate_diagnostic_location(state_home, configured)?;
-    ensure_private_state_home(state_home)?;
     let parent_path = configured
         .parent()
         .ok_or_else(|| anyhow!("diagnostic path has no parent directory"))?;
-    create_private_directories(state_home, parent_path)?;
-    reject_symlinks(configured)?;
-    let parent = open_directory_nofollow(parent_path)
-        .context("cannot retain diagnostic parent directory")?;
+    let parent = open_absolute_directory_tree(parent_path, true, Some(state_home), hook)
+        .context("cannot securely prepare diagnostic parent directory")?;
     let file_name = configured
         .file_name()
         .ok_or_else(|| anyhow!("diagnostic path has no file name"))?
         .to_os_string();
-    let anchored_target = anchored_child_path(&parent, parent_path, &file_name);
+    let anchored_target = anchored_child_path(parent.directory(), &parent.path, &file_name);
     ensure!(
         fs::symlink_metadata(&anchored_target)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
@@ -305,7 +349,6 @@ pub(crate) fn prepare_new_diagnostic_path(
     );
     Ok(PreparedDiagnosticPath {
         path: configured.to_path_buf(),
-        parent_path: parent_path.to_path_buf(),
         parent,
         file_name,
     })
@@ -315,17 +358,33 @@ pub(crate) fn open_existing_diagnostic_path(
     state_home: &Path,
     configured: &Path,
 ) -> Result<OpenedDiagnosticPath> {
+    open_existing_diagnostic_path_inner(state_home, configured, |_| {})
+}
+
+#[cfg(test)]
+fn open_existing_diagnostic_path_with_hook(
+    state_home: &Path,
+    configured: &Path,
+    hook: impl FnMut(&Path),
+) -> Result<OpenedDiagnosticPath> {
+    open_existing_diagnostic_path_inner(state_home, configured, hook)
+}
+
+fn open_existing_diagnostic_path_inner(
+    state_home: &Path,
+    configured: &Path,
+    hook: impl FnMut(&Path),
+) -> Result<OpenedDiagnosticPath> {
     validate_diagnostic_location(state_home, configured)?;
-    reject_symlinks(configured)?;
     let parent_path = configured
         .parent()
         .ok_or_else(|| anyhow!("diagnostic path has no parent directory"))?;
-    let parent = open_directory_nofollow(parent_path)
-        .context("cannot retain promotion diagnostic parent directory")?;
+    let parent = open_absolute_directory_tree(parent_path, false, None, hook)
+        .context("cannot securely retain promotion diagnostic parent directory")?;
     let file_name = configured
         .file_name()
         .ok_or_else(|| anyhow!("promotion diagnostic path has no file name"))?;
-    let anchored = anchored_child_path(&parent, parent_path, file_name);
+    let anchored = anchored_child_path(parent.directory(), &parent.path, file_name);
     let file = open_regular_file_nofollow(&anchored)
         .context("cannot securely open promotion diagnostic")?;
     ensure!(
@@ -360,7 +419,7 @@ fn validate_diagnostic_location(state_home: &Path, configured: &Path) -> Result<
         !configured.starts_with(reference_reports),
         "diagnostics may not be written under reference-reports"
     );
-    reject_symlinks(configured)
+    Ok(())
 }
 
 fn validate_absolute_without_traversal(path: &Path, label: &str) -> Result<()> {
@@ -377,127 +436,140 @@ fn validate_absolute_without_traversal(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn reject_symlinks(path: &Path) -> Result<()> {
-    let mut prefix = PathBuf::new();
+fn open_absolute_directory_tree(
+    path: &Path,
+    create_missing: bool,
+    private_root: Option<&Path>,
+    mut after_open: impl FnMut(&Path),
+) -> Result<RetainedDirectoryPath> {
+    validate_absolute_without_traversal(path, "directory path")?;
+    let mut current_path = PathBuf::new();
+    let mut descriptors = Vec::new();
+
     for component in path.components() {
-        prefix.push(component.as_os_str());
-        match fs::symlink_metadata(&prefix) {
-            Ok(metadata) => ensure!(
-                !metadata.file_type().is_symlink(),
-                "diagnostic path contains symlink {}",
-                prefix.display()
-            ),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("cannot inspect diagnostic path {}", prefix.display())
-                })
-            }
-        }
-    }
-    Ok(())
-}
-
-fn ensure_private_state_home(state_home: &Path) -> Result<()> {
-    reject_symlinks(state_home)?;
-    let created = match fs::symlink_metadata(state_home) {
-        Ok(metadata) => {
-            ensure!(
-                metadata.is_dir() && !metadata.file_type().is_symlink(),
-                "state home is not a real directory"
-            );
-            false
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(state_home).context("cannot create state home")?;
-            true
-        }
-        Err(error) => return Err(error).context("cannot inspect state home"),
-    };
-    reject_symlinks(state_home)?;
-    if created {
-        set_directory_mode(state_home)?;
-    }
-    Ok(())
-}
-
-fn create_private_directories(state_home: &Path, parent: &Path) -> Result<()> {
-    ensure!(
-        parent.starts_with(state_home),
-        "diagnostic parent escapes state home"
-    );
-    let mut current = state_home.to_path_buf();
-    ensure!(current.is_dir(), "state home must exist and be a directory");
-    for component in parent
-        .strip_prefix(state_home)
-        .context("diagnostic parent escapes state home")?
-        .components()
-    {
-        let Component::Normal(part) = component else {
-            bail!("diagnostic parent contains traversal");
-        };
-        current.push(part);
-        match fs::symlink_metadata(&current) {
-            Ok(metadata) => {
-                ensure!(
-                    !metadata.file_type().is_symlink() && metadata.is_dir(),
-                    "diagnostic parent {} is not a real directory",
-                    current.display()
-                );
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current).with_context(|| {
-                    format!(
-                        "cannot create private diagnostic directory {}",
-                        current.display()
-                    )
+        match component {
+            Component::Prefix(prefix) => current_path.push(prefix.as_os_str()),
+            Component::RootDir => {
+                current_path.push(component.as_os_str());
+                let root = open_directory_nofollow(&current_path).with_context(|| {
+                    format!("cannot securely open directory {}", current_path.display())
                 })?;
+                descriptors.push(root);
+                after_open(&current_path);
             }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("cannot inspect diagnostic directory {}", current.display())
-                })
+            Component::Normal(part) => {
+                let parent = descriptors
+                    .last()
+                    .ok_or_else(|| anyhow!("absolute directory path has no opened root"))?;
+                let child = anchored_child_path(parent, &current_path, part);
+                let mut created = false;
+                let opened = match open_directory_nofollow(&child) {
+                    Ok(opened) => opened,
+                    Err(error)
+                        if create_missing && error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        match create_private_directory(&child) {
+                            Ok(()) => created = true,
+                            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(error) => {
+                                return Err(error).with_context(|| {
+                                    format!(
+                                        "cannot create private diagnostic directory {}",
+                                        current_path.join(part).display()
+                                    )
+                                })
+                            }
+                        }
+                        open_directory_nofollow(&child).with_context(|| {
+                            format!(
+                                "cannot securely open diagnostic directory {} after creation",
+                                current_path.join(part).display()
+                            )
+                        })?
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "cannot securely open diagnostic directory {}",
+                                current_path.join(part).display()
+                            )
+                        })
+                    }
+                };
+                current_path.push(part);
+                if created
+                    || private_root.is_some_and(|root| {
+                        current_path.starts_with(root) && current_path.as_path() != root
+                    })
+                {
+                    set_open_directory_private(&opened).with_context(|| {
+                        format!("cannot set private mode on {}", current_path.display())
+                    })?;
+                }
+                descriptors.push(opened);
+                after_open(&current_path);
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(anyhow!("directory path contains traversal"));
             }
         }
-        set_directory_mode(&current)?;
     }
-    Ok(())
+    ensure!(
+        !descriptors.is_empty(),
+        "absolute directory path has no opened root"
+    );
+    Ok(RetainedDirectoryPath {
+        path: current_path,
+        descriptors,
+    })
 }
 
 #[cfg(unix)]
-fn set_directory_mode(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("cannot set private mode on {}", path.display()))
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700).create(path)
 }
 
 #[cfg(not(unix))]
-fn set_directory_mode(_path: &Path) -> Result<()> {
+fn create_private_directory(path: &Path) -> std::io::Result<()> {
+    fs::create_dir(path)
+}
+
+#[cfg(unix)]
+fn set_open_directory_private(directory: &File) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    directory
+        .set_permissions(fs::Permissions::from_mode(0o700))
+        .context("cannot set private directory permissions")
+}
+
+#[cfg(not(unix))]
+fn set_open_directory_private(_directory: &File) -> Result<()> {
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn open_directory_nofollow(path: &Path) -> Result<File> {
+fn open_directory_nofollow(path: &Path) -> std::io::Result<File> {
     const O_DIRECTORY: i32 = 0o200000;
     const O_NOFOLLOW: i32 = 0o400000;
-    let file = OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .custom_flags(O_DIRECTORY | O_NOFOLLOW)
         .open(path)
-        .with_context(|| format!("cannot securely open directory {}", path.display()))?;
-    ensure!(
-        file.metadata()?.is_dir(),
-        "securely opened path is not a directory"
-    );
-    Ok(file)
 }
 
 #[cfg(not(target_os = "linux"))]
-fn open_directory_nofollow(path: &Path) -> Result<File> {
-    let file =
-        File::open(path).with_context(|| format!("cannot open directory {}", path.display()))?;
-    ensure!(file.metadata()?.is_dir(), "opened path is not a directory");
-    Ok(file)
+fn open_directory_nofollow(path: &Path) -> std::io::Result<File> {
+    let file = File::open(path)?;
+    if file.metadata()?.is_dir() {
+        Ok(file)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            "opened path is not a directory",
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -526,13 +598,13 @@ fn anchored_child_path(_parent: &File, parent_path: &Path, name: &OsStr) -> Path
 }
 
 #[cfg(target_os = "linux")]
-fn anchored_directory_path(parent: &File, _parent_path: &Path) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()))
+fn anchored_directory_path(parent: &RetainedDirectoryPath) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", parent.directory().as_raw_fd()))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn anchored_directory_path(_parent: &File, parent_path: &Path) -> PathBuf {
-    parent_path.to_path_buf()
+fn anchored_directory_path(parent: &RetainedDirectoryPath) -> PathBuf {
+    parent.path.clone()
 }
 
 pub(crate) fn persist_diagnostic(
@@ -546,8 +618,12 @@ pub(crate) fn persist_diagnostic(
         serde_json::to_vec_pretty(report).context("cannot serialize diagnostic JSON")?;
     bytes.push(b'\n');
 
-    let parent = anchored_directory_path(&prepared.parent, &prepared.parent_path);
-    let target = anchored_child_path(&prepared.parent, &prepared.parent_path, &prepared.file_name);
+    let parent = anchored_directory_path(&prepared.parent);
+    let target = anchored_child_path(
+        prepared.parent.directory(),
+        &prepared.parent.path,
+        &prepared.file_name,
+    );
     ensure!(
         fs::symlink_metadata(&target)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
@@ -576,6 +652,7 @@ pub(crate) fn persist_diagnostic(
         .context("cannot atomically publish diagnostic without clobbering")?;
     prepared
         .parent
+        .directory()
         .sync_all()
         .context("cannot sync diagnostic directory")?;
     Ok(())
@@ -1191,6 +1268,97 @@ mod tests {
         fs::write(&target, b"replacement\n").unwrap();
 
         assert_eq!(opened.read_bytes().unwrap(), b"original\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_final_ancestor_swaps_cannot_escape_diagnostic_reads_or_writes() {
+        use std::os::unix::fs::symlink;
+
+        let write_area = tempfile::tempdir().unwrap();
+        let write_state = write_area.path().join("state");
+        let original_ancestor = write_state.join("aurscan");
+        fs::create_dir_all(&original_ancestor).unwrap();
+        let retained_ancestor = write_state.join("retained-aurscan");
+        let outside_write = tempfile::tempdir().unwrap();
+        let write_target = original_ancestor.join("eval-runs/nested/report.json");
+        let mut swapped = false;
+        let prepared =
+            prepare_new_diagnostic_path_with_hook(&write_state, &write_target, |opened_path| {
+                if !swapped && opened_path == original_ancestor {
+                    fs::rename(&original_ancestor, &retained_ancestor).unwrap();
+                    symlink(outside_write.path(), &original_ancestor).unwrap();
+                    swapped = true;
+                }
+            })
+            .unwrap();
+        assert!(swapped);
+        persist_diagnostic(prepared, &report()).unwrap();
+        assert!(retained_ancestor
+            .join("eval-runs/nested/report.json")
+            .is_file());
+        assert!(!outside_write
+            .path()
+            .join("eval-runs/nested/report.json")
+            .exists());
+
+        let read_area = tempfile::tempdir().unwrap();
+        let read_state = read_area.path().join("state");
+        let original_ancestor = read_state.join("aurscan");
+        let original_target = original_ancestor.join("eval-runs/promotion.json");
+        fs::create_dir_all(original_target.parent().unwrap()).unwrap();
+        fs::write(&original_target, b"trusted\n").unwrap();
+        let outside_read = tempfile::tempdir().unwrap();
+        let outside_target = outside_read.path().join("eval-runs/promotion.json");
+        fs::create_dir_all(outside_target.parent().unwrap()).unwrap();
+        fs::write(&outside_target, b"escaped\n").unwrap();
+        let retained_ancestor = read_state.join("retained-aurscan");
+        let mut swapped = false;
+        let mut opened =
+            open_existing_diagnostic_path_with_hook(&read_state, &original_target, |opened_path| {
+                if !swapped && opened_path == original_ancestor {
+                    fs::rename(&original_ancestor, &retained_ancestor).unwrap();
+                    symlink(outside_read.path(), &original_ancestor).unwrap();
+                    swapped = true;
+                }
+            })
+            .unwrap();
+        assert!(swapped);
+        assert_eq!(opened.read_bytes().unwrap(), b"trusted\n");
+        assert_eq!(fs::read(&outside_target).unwrap(), b"escaped\n");
+    }
+
+    #[test]
+    fn promotion_reads_are_capped_above_a_bounded_57_case_diagnostic() {
+        let mut bounded = report();
+        let case = bounded.case_results[0].clone();
+        bounded.selected_case_ids = (0..57).map(|index| format!("case-{index:02}")).collect();
+        bounded.case_results = bounded
+            .selected_case_ids
+            .iter()
+            .map(|id| {
+                let mut case = case.clone();
+                case.id = id.clone();
+                case.accepted_findings =
+                    (0..32).map(|_| case.accepted_findings[0].clone()).collect();
+                case
+            })
+            .collect();
+        let bounded_bytes = serde_json::to_vec_pretty(&bounded).unwrap();
+        assert!(
+            bounded_bytes.len() as u64 * 4 < MAX_PROMOTION_DIAGNOSTIC_BYTES,
+            "promotion cap has insufficient headroom for the bounded 57-case artifact"
+        );
+
+        let temporary = tempfile::tempdir().unwrap();
+        let state_home = temporary.path();
+        let target = state_home.join("aurscan/eval-runs/oversized.json");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let file = File::create(&target).unwrap();
+        file.set_len(MAX_PROMOTION_DIAGNOSTIC_BYTES + 1).unwrap();
+        drop(file);
+        let mut opened = open_existing_diagnostic_path(state_home, &target).unwrap();
+        assert!(opened.read_bytes().is_err());
     }
 
     #[test]
