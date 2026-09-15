@@ -3,8 +3,8 @@
 **Last updated:** 2026-09-15  
 **Repository:** `aur_package_scanner`  
 **Branch:** `feat/add-llm-integration`  
-**Implementation base:** `b91cf321c2edc5fb1e0f6af5dca675c31763b1bc`\
-**Review/publication:** cooperative cleanup amendment awaits fresh independent acceptance and publication
+**Accepted implementation:** `3807dd4008f5dceb2faf85968e4478df5c9e7143`\
+**Foundation status:** independently accepted, published, and closed
 
 ## Start Here
 
@@ -12,13 +12,13 @@ In a new Pi session:
 
 ```text
 Read AGENTS.md and HANDOFF.md completely. Run `arc prime` using the new
-session's own session ID. Do not run any provider-backed calibration or
-qualification. Read the Current Execution Amendment in Arc task
-aurscan-0qag.01vn62.1.9.3 and approved plan.056dgb in permanent parent design
-aurscan-0qag.01vn62.1.9. The two-file implementation is ready for fresh
-independent specification, code, and adversarial review under the approved
-cooperative cleanup boundary. Check actual review and publication evidence
-before closing the foundation task.
+session's own session ID. Foundation aurscan-0qag.01vn62.1.9.3 is accepted,
+published, and closed at implementation commit 3807dd4 under approved
+plan.056dgb. Read its completion evidence and permanent parent design
+aurscan-0qag.01vn62.1.9, which remains open. Inspect promotion-preflight task
+aurscan-0qag.01vn62.1.9.4 and its configuration, consent, and authorization
+requirements before any operational run. Dependency readiness does not
+authorize a paid run; this implementation request authorized none.
 ```
 
 Useful commands:
@@ -27,6 +27,7 @@ Useful commands:
 git status --short --branch
 git log -12 --oneline
 arc show aurscan-0qag.01vn62.1.9.3
+arc show aurscan-0qag.01vn62.1.9.4
 arc show aurscan-0qag.01vn62.1.9
 arc plan show plan.04ynkn
 arc plan show plan.056dgb
@@ -37,11 +38,13 @@ Do not copy the previous session ID into a new worker. Let the new harness provi
 
 ## Current Outcome
 
-The client-only experimental LLM integration is implemented through CLI E2E coverage and user documentation. The approved `plan.056dgb` cooperative cleanup amendment is implemented in `runner.rs` and this handoff, but the semantic-promotion foundation is **awaiting independent implementation acceptance**.
+The client-only experimental LLM integration is implemented through CLI E2E coverage and user documentation. The semantic-promotion foundation, including the approved `plan.056dgb` cooperative cleanup amendment, is **independently accepted, published, and closed** at implementation commit `3807dd4008f5dceb2faf85968e4478df5c9e7143`.
 
 The probe's identity check and pathname unlink remain separate. Every same-account process touching the active probe entry must coordinate through the retained directory lock, regardless of intent. Accidental and deliberate uncoordinated mutation of that exact entry is outside the cleanup guarantee; unrelated files and all other safeguards remain covered.
 
-The five new offline regressions cover lock release/reacquisition, a regular-file replacement installed before validation, missing entries, symlink/directory rejection, and stale-probe preservation. Fresh implementation review and publication remain pending. No provider-backed calibration or qualification was run in this session, and no accepted reference report exists.
+The five new offline regressions cover lock release/reacquisition, a regular-file replacement installed before validation, missing entries, symlink/directory rejection, and stale-probe preservation. Independent code and specification reviews accepted the implementation; the isolated evaluator passed all 11 authored tests. The signed implementation commit was pushed and origin synchronization verified before this handoff-only update.
+
+Parent epic `.1.9` remains open. Promotion preflight `.1.9.4` is ready by dependencies, but was neither run nor authorized by this implementation request. No provider-backed calibration or qualification was run in this session, and no accepted reference report exists.
 
 ## Non-Negotiable Product Contracts
 
@@ -70,8 +73,8 @@ The foundation task's **Current Execution Amendment** is the current two-file im
 
 The approved sequence is:
 
-1. Correct and independently accept the semantic oracle/promotion harness.
-2. Run exactly one 17-case promotion preflight.
+1. Correct and independently accept the semantic oracle/promotion harness — completed at `3807dd4`.
+2. Inspect the operational task and satisfy configuration, consent, and authorization requirements before exactly one 17-case promotion preflight.
 3. If it passes, obtain fresh explicit owner authorization.
 4. Run exactly one full 57-case qualification.
 5. Publish accepted metrics only if every frozen threshold passes.
@@ -80,9 +83,9 @@ The approved sequence is:
 
 | Arc ID | Status | Purpose | Blocking relationship |
 |---|---|---|---|
-| `aurscan-0qag.01vn62.1.9` | open | Remediation epic | Keep open while foundation/T4 remain unresolved |
-| `aurscan-0qag.01vn62.1.9.3` | **in progress; independent acceptance pending**, `high-risk` | Correct oracle and land modular promotion harness | Blocks `.1.9.4` |
-| `aurscan-0qag.01vn62.1.9.4` | open, `devops` | One paid 17-case promotion preflight | Depends on `.1.9.3`; do not run |
+| `aurscan-0qag.01vn62.1.9` | **open** | Remediation epic | Keep open while operational work/T4 remain unresolved |
+| `aurscan-0qag.01vn62.1.9.3` | **closed**, `high-risk` | Correct oracle and land modular promotion harness | Accepted and published at `3807dd4`; dependency satisfied |
+| `aurscan-0qag.01vn62.1.9.4` | open, ready by dependencies, `devops` | One paid 17-case promotion preflight | Configuration, consent, and operational authorization still required; not run |
 | `aurscan-0qag.01vn62.1.5` | blocked, `devops` | One conditional 57-case qualification and accepted report | Depends on `.1.9.4`; do not run |
 | `aurscan-0qag.01vn62.1.7` | **closed**, `docs-only` | Experimental LLM usage documentation | Completed at `ef538d3` |
 | `aurscan-0qag.01vn62.1.9.5` | open, `docs-only` | Accepted reference-metrics addendum | Depends on T4 and docs; do not write yet |
@@ -98,7 +101,7 @@ The approved sequence is:
 
 ### Oracle and promotion harness implementation
 
-The following prior implementation is committed and pushed. Its final cleanup review finding led to approved `plan.056dgb`; task `.1.9.3` still requires fresh acceptance of the current amendment:
+The following implementation is committed and pushed. The historical cleanup review finding led to approved `plan.056dgb`, whose implementation passed fresh acceptance before task `.1.9.3` closed:
 
 - `f87bc57` — modular live harness, schema-v2 corpus, guarded fixtures, diagnostics, promotion binding
 - `986be34` — empty `XDG_STATE_HOME` fallback
@@ -107,6 +110,7 @@ The following prior implementation is committed and pushed. Its final cleanup re
 - `574e853` — ancestor, candidate, config, bounded-read, and process-launch hardening
 - `69f3166` — immutable first-write reference attempt
 - `9fc0cef` — pathless `O_TMPFILE` publication and whole-file benchmark-token validation
+- `3807dd4` — approved cooperative probe-cleanup contract, five offline regressions, and manual stale-probe recovery guidance
 
 Important implemented behavior includes:
 
@@ -132,9 +136,9 @@ Commit `ef538d3` updated:
 
 The docs cover direct OpenAI and generic OpenAI-compatible/OpenRouter configuration, explicit request profiles, environment-only credentials, egress/privacy/cost disclosure, commands and exits, Advisory-only behavior, acknowledgements, JSON trust boundaries, and deferred v2 work. They explicitly state that no tested model currently satisfies the frozen v1 bar and no accepted `v1.json` exists.
 
-## Exact Remaining Blocker
+## Foundation Acceptance and Historical Blocker
 
-Fresh independent specification, code, and isolated adversarial acceptance of the current two-file amendment, followed by publication, remain required before `.1.9.3` can close.
+The foundation has no remaining acceptance blocker. Independent code review returned **ADHERENT** with no findings; specification review returned **COMPLIANT** against all eight criteria; isolated adversarial evaluation returned **PASS** with 11 passing tests. The orchestrator verified the retained and fresh offline evidence, published signed commit `3807dd4`, confirmed origin synchronization, and closed `.1.9.3`. The parent epic remains open for operational work.
 
 Historically, strict final specification review rejected task `.1.9.3` at `9fc0cef` for this issue:
 
@@ -177,7 +181,7 @@ This recovery procedure does not authorize another paid run.
 
 ## Provider and Evaluation Safety
 
-Until `.1.9.3` is accepted and closed:
+Foundation closure and this handoff authorize no provider-backed operation. For the current implementation request:
 
 - Do **not** run `live_calibration_evaluation`.
 - Do **not** run `live_reference_evaluation`.
@@ -190,7 +194,7 @@ The intended candidate remains revision-pinned `gpt-5.6-sol` with `request_profi
 
 ## Last Fresh Quality Evidence
 
-Current implementation evidence is based on `b91cf321c2edc5fb1e0f6af5dca675c31763b1bc`, with `runner.rs` SHA-256 `c3a148cbbc89736876a84c2a1a9bef0be412bc29040a3240eff170a8f28a2495`. Full gate logs and per-gate revision/content identities are retained in `/tmp/arc-build-context.6_ijyp0q/aurscan-0qag.01vn62.1.9.3/builder-logs/`.
+Accepted implementation evidence covers `b91cf321c2edc5fb1e0f6af5dca675c31763b1bc..3807dd4008f5dceb2faf85968e4478df5c9e7143`, with `runner.rs` SHA-256 `c3a148cbbc89736876a84c2a1a9bef0be412bc29040a3240eff170a8f28a2495`. Retained context is `/tmp/arc-build-context.6_ijyp0q/aurscan-0qag.01vn62.1.9.3/`: builder gate logs and per-gate revision/content identities are in `builder-logs/`; fresh orchestrator counts are in `orchestrator-verification.json`; code/spec acceptance is in `code-review-observation.json` and `spec-review-observation.json`; isolated evaluator evidence is in `evaluator-evidence/`.
 
 The RED step failed compilation because the new helper name was not yet defined. The helper rename and contract comment made the focused suite pass; no behavior failure was manufactured for existing behavior.
 
@@ -201,15 +205,19 @@ cargo test --locked -p aurscan-llm --test live_eval     PASS: 55 passed, 2 ignor
 cargo fmt --check                                      PASS
 cargo clippy --locked --workspace --all-targets -- -D warnings
                                                        PASS
-cargo test --locked --workspace                        PASS: 411 passed, 3 ignored
+cargo test --locked --workspace                        PASS: 410 top-level passed, 3 ignored
 cargo build --locked --workspace                       PASS
 ```
 
-The initial sandboxed workspace run stopped when two unchanged CLI tests could not bind temporary Unix sockets (`PermissionDenied`). The same required suite passed after approved execution outside the sandbox. Both attempts are retained in `gate-workspace-tests.log` and `gate-workspace-tests-unsandboxed.log`; no code change was needed.
+The orchestrator freshly confirmed 55 focused passes with 2 live tests ignored, and 410 top-level workspace passes with 3 intentionally ignored tests, all with zero failures. One nested subprocess test also passed. The earlier builder total of 411 combined that nested pass with the 410 top-level passes.
 
-Both live evaluation tests remain explicitly ignored, as does the existing source-writing snapshot recorder. No live-provider access or fixture execution occurred during these gates; workspace transport tests use local mock servers. Independent implementation reviews remain pending. Subsequent handoff-only evidence updates do not alter the tested Rust source hash above.
+The initial sandboxed workspace run stopped when two unchanged CLI tests could not bind temporary Unix sockets (`PermissionDenied`). The same required suite passed after approved execution outside the sandbox. Both attempts are retained in `builder-logs/gate-workspace-tests.log` and `builder-logs/gate-workspace-tests-unsandboxed.log`; no code change was needed.
 
-Required offline verification commands:
+The isolated evaluator independently passed **11 tests, 0 failures, 0 ignored**, with the 57 existing harness tests filtered out. It exercised cleanup, lock lifecycle, stale-entry preservation, exact retained-FD linking, and directory anchoring. Actual qualification orchestration and full report serialization/threshold rejection were outside those evaluator tests; their evidence comes separately from the retained suite, fresh orchestrator runs, and specification review. The evaluator did not test the excluded uncoordinated replacement between validation and unlink.
+
+Both live evaluation tests remain explicitly ignored, as does the existing source-writing snapshot recorder. No live-provider access or fixture execution occurred during these gates; workspace transport tests use local mock servers. This handoff-only status update does not alter the accepted Rust source hash above and does not require repeating the passing Rust gates.
+
+Completed offline verification commands:
 
 ```bash
 cargo test --locked -p aurscan-llm --test live_eval
@@ -221,7 +229,7 @@ git diff --check
 git status --short --branch
 ```
 
-Then run fresh Arc spec review, code review, and isolated adversarial evaluation before closing `.1.9.3`.
+Fresh independent specification, code, and isolated adversarial acceptance, implementation publication, and foundation closure are complete.
 
 ## Repository Hygiene
 
@@ -244,7 +252,7 @@ Do not drop these stashes without explicit owner authorization.
 1. Read this file and `AGENTS.md`.
 2. Run `arc prime` with the new session identity.
 3. Confirm actual branch/upstream state and preserve unrelated work and existing stashes.
-4. Read `.1.9.3`'s Current Execution Amendment and permanent parent design, including approved `plan.056dgb`.
-5. Review the two-file implementation and its revision-bound offline evidence; obtain fresh independent specification, code, and isolated adversarial acceptance under the stated cooperative boundary.
-6. If acceptance passes, publish and verify the reviewed commit, record actual evidence, and close only the foundation task. Keep it unaccepted if any required review fails; do not widen the exclusion to waive findings.
-7. Do not progress to `.1.9.4` until `.1.9.3` has fresh independent acceptance and is formally closed. Operational work retains its separate configuration, consent, and authorization gates.
+4. Read closed `.1.9.3`'s completion evidence and permanent parent design, including approved `plan.056dgb`; preserve the accepted coordination boundary.
+5. Inspect ready-by-dependencies promotion-preflight task `.1.9.4` and its stored run contract. The foundation is complete; this implementation request did not authorize a live run.
+6. Before any operational run, verify the task's configuration, diagnostic destination, consent, and explicit authorization requirements. Preserve manual stale-probe recovery and the prohibition on automatic paid-run retries.
+7. Keep parent epic `.1.9` open. Qualification `.1.5` remains blocked on a passing preflight and fresh owner authorization; accepted metrics remain blocked on successful qualification.
