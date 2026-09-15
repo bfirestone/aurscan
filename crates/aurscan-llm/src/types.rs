@@ -1,4 +1,4 @@
-use aurscan_core::{DetectorId, Finding};
+use aurscan_core::{DetectorId, Finding, Severity};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -203,11 +203,61 @@ pub struct TokenUsage {
     pub output_tokens: u64,
 }
 
+/// Safe host-owned failure categories. The code identifies the stage without
+/// carrying provider prose, request data, credentials, or candidate locations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisFailureCode {
+    RequestCap,
+    RequestEncoding,
+    RequestSize,
+    CredentialUnavailable,
+    ProviderFailure,
+    NonStopFinish,
+    CandidateSchema,
+    FindingCountLimit,
+    UnknownFile,
+    InvalidCitationRange,
+    CitationOutOfBounds,
+    EvidenceLineLimit,
+    ReasonSizeLimit,
+    ForbiddenReasonCharacter,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalysisFailure {
+    pub code: AnalysisFailureCode,
+    /// Zero-based original candidate index, never a materialized finding index.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub finding_index: Option<usize>,
+}
+
+/// Original validated coordinates, in the same one-to-one order as findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ValidatedFindingSpan {
+    pub finding_index: usize,
+    pub kind: LlmFindingKind,
+    pub severity: Severity,
+    pub relative_file: String,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AnalysisDiagnostics {
+    /// Present only after deserialization and the configured finding-count gate.
+    pub candidate_count: Option<usize>,
+    pub failures: Vec<AnalysisFailure>,
+    pub finding_spans: Vec<ValidatedFindingSpan>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AnalysisOutcome {
     pub status: AnalysisStatus,
     pub source: Option<AnalysisSource>,
     pub findings: Vec<Finding>,
+    pub diagnostics: AnalysisDiagnostics,
     pub identity: Option<AnalysisIdentity>,
     pub usage: Option<TokenUsage>,
     pub reason: Option<String>,

@@ -1,5 +1,6 @@
 use super::corpus::validate_relative_path;
 use anyhow::{anyhow, ensure, Context, Result};
+use aurscan_llm::{AnalysisFailure, AnalysisFailureCode, LlmFindingKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -99,6 +100,10 @@ pub(crate) struct DiagnosticCaseResult {
     pub(crate) expected_hit: bool,
     pub(crate) expected_kinds: Vec<String>,
     pub(crate) accepted_findings: Vec<DiagnosticFindingRef>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub(crate) candidate_count: Option<usize>,
+    pub(crate) failures: Vec<AnalysisFailure>,
+    /// All retained findings were grounded; this does not mean the case completed.
     pub(crate) grounded: bool,
     pub(crate) status: DiagnosticStatus,
     pub(crate) latency_ms: u64,
@@ -672,7 +677,7 @@ fn set_file_mode(_file: &File) -> Result<()> {
 }
 
 pub(crate) fn validate_report(report: &DiagnosticReport) -> Result<()> {
-    ensure!(report.schema_version == 1, "diagnostic schema changed");
+    ensure!(report.schema_version == 2, "diagnostic schema changed");
     ensure!(
         (report.outcome == RunOutcome::Passed && report.failed_threshold_ids.is_empty())
             || (report.outcome == RunOutcome::Rejected && !report.failed_threshold_ids.is_empty()),
@@ -728,7 +733,18 @@ pub(crate) fn validate_report(report: &DiagnosticReport) -> Result<()> {
         "diagnostic case results do not match selected ID order"
     );
     for case in &report.case_results {
+        validate_case_diagnostics(
+            case.status,
+            case.candidate_count,
+            &case.failures,
+            case.accepted_findings.len(),
+        )?;
         for finding in &case.accepted_findings {
+            ensure!(
+                serde_json::from_value::<LlmFindingKind>(Value::String(finding.kind.clone()))
+                    .is_ok(),
+                "diagnostic finding kind is invalid"
+            );
             validate_relative_path(&finding.relative_file)
                 .context("diagnostic finding path is unsafe")?;
             ensure!(
@@ -752,6 +768,110 @@ pub(crate) fn validate_report(report: &DiagnosticReport) -> Result<()> {
         report.metrics.invalid_or_incomplete_rate,
     ] {
         ensure!(percentage.is_finite(), "diagnostic metric is not finite");
+    }
+    Ok(())
+}
+
+/// Candidate indexes refer to the original response array. Each candidate is
+/// either retained or rejected once; globals never consume a candidate slot.
+pub(crate) fn validate_case_diagnostics(
+    status: DiagnosticStatus,
+    candidate_count: Option<usize>,
+    failures: &[AnalysisFailure],
+    accepted_count: usize,
+) -> Result<()> {
+    use AnalysisFailureCode::*;
+    ensure!(
+        accepted_count <= 256 && failures.len() <= 257,
+        "diagnostic metadata exceeds host cap"
+    );
+    let mut indexes = BTreeSet::new();
+    let mut globals = std::collections::HashSet::new();
+    for failure in failures {
+        let indexed = matches!(
+            failure.code,
+            UnknownFile
+                | InvalidCitationRange
+                | CitationOutOfBounds
+                | EvidenceLineLimit
+                | ReasonSizeLimit
+                | ForbiddenReasonCharacter
+        );
+        ensure!(
+            indexed == failure.finding_index.is_some(),
+            "diagnostic failure index is incompatible with code"
+        );
+        if let Some(index) = failure.finding_index {
+            ensure!(
+                candidate_count.is_some_and(|count| index < count) && indexes.insert(index),
+                "diagnostic rejection index is invalid or duplicate"
+            );
+        } else {
+            ensure!(
+                globals.insert(failure.code),
+                "diagnostic global code is duplicate"
+            );
+        }
+    }
+    if let Some(count) = candidate_count {
+        ensure!(
+            count <= 256 && accepted_count + indexes.len() == count,
+            "diagnostic candidate totals disagree"
+        );
+    } else {
+        ensure!(
+            accepted_count == 0 && indexes.is_empty(),
+            "diagnostic findings require candidate count"
+        );
+    }
+    match status {
+        DiagnosticStatus::Completed => ensure!(
+            candidate_count.is_some() && failures.is_empty(),
+            "completed diagnostic has failures or missing count"
+        ),
+        DiagnosticStatus::Unavailable => ensure!(
+            candidate_count.is_none()
+                && failures.len() == 1
+                && globals
+                    .iter()
+                    .all(|code| matches!(code, CredentialUnavailable | ProviderFailure)),
+            "unavailable diagnostic has incompatible metadata"
+        ),
+        DiagnosticStatus::Incomplete => {
+            ensure!(!failures.is_empty(), "incomplete diagnostic has no failure");
+            if candidate_count.is_some() {
+                ensure!(
+                    globals.iter().all(|code| *code == NonStopFinish),
+                    "grounded diagnostic has incompatible global failure"
+                );
+            } else {
+                let primary = globals
+                    .iter()
+                    .filter(|code| **code != NonStopFinish)
+                    .copied()
+                    .collect::<Vec<_>>();
+                ensure!(
+                    primary.len() == 1,
+                    "unparsed diagnostic requires one primary failure"
+                );
+                ensure!(
+                    matches!(
+                        primary[0],
+                        RequestCap
+                            | RequestEncoding
+                            | RequestSize
+                            | CandidateSchema
+                            | FindingCountLimit
+                    ),
+                    "incomplete diagnostic has incompatible code"
+                );
+                ensure!(
+                    !globals.contains(&NonStopFinish)
+                        || matches!(primary[0], CandidateSchema | FindingCountLimit),
+                    "finish failure has incompatible stage"
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -852,12 +972,16 @@ pub(crate) fn stdout_summary(report: &DiagnosticReport, path: &Path) -> String {
                 })
                 .collect::<Vec<_>>()
                 .join("+");
+            let failures = case.failures.iter().map(|failure| {
+                let code = serde_json::to_string(&failure.code).expect("closed failure code serializes");
+                format!("{}@{}", code.trim_matches('"'), failure.finding_index.map_or_else(|| "global".to_owned(), |index| index.to_string()))
+            }).collect::<Vec<_>>().join("+");
             let usage = case.usage.as_ref().map_or_else(
                 || "none".to_owned(),
                 |usage| format!("{}+{}", usage.input_tokens, usage.output_tokens),
             );
             format!(
-                "{}({}):expected={}/{}:accepted={}:grounded={}:status={:?}:latency_ms={}:usage={}",
+                "{}({}):expected={}/{}:accepted={}:grounded={}:status={:?}:candidate_count={:?}:failures={}:latency_ms={}:usage={}",
                 terminal_escape(&case.id),
                 terminal_escape(&case.category),
                 case.expected_hit,
@@ -865,6 +989,8 @@ pub(crate) fn stdout_summary(report: &DiagnosticReport, path: &Path) -> String {
                 accepted_findings,
                 case.grounded,
                 case.status,
+                case.candidate_count,
+                failures,
                 case.latency_ms,
                 usage
             )
@@ -917,7 +1043,7 @@ mod tests {
     fn report() -> DiagnosticReport {
         let identity = identity();
         DiagnosticReport {
-            schema_version: 1,
+            schema_version: 2,
             run_kind: RunKind::Calibration,
             outcome: RunOutcome::Passed,
             failed_threshold_ids: Vec::new(),
@@ -966,6 +1092,8 @@ mod tests {
                     start_line: 7,
                     end_line: 8,
                 }],
+                candidate_count: Some(1),
+                failures: Vec::new(),
                 grounded: true,
                 status: DiagnosticStatus::Completed,
                 latency_ms: 2,
@@ -1342,6 +1470,7 @@ mod tests {
                 case.id = id.clone();
                 case.accepted_findings =
                     (0..32).map(|_| case.accepted_findings[0].clone()).collect();
+                case.candidate_count = Some(32);
                 case
             })
             .collect();
@@ -1384,5 +1513,172 @@ mod tests {
         assert!(summary.contains("\\u{000a}"));
         assert!(summary.contains("\\u{001b}"));
         assert!(summary.contains("\\u{202e}"));
+    }
+    #[test]
+    fn schema2_roundtrip_and_failure_consistency_are_strict() {
+        let mut valid = serde_json::to_value(report()).unwrap();
+        valid["schema_version"] = serde_json::json!(2);
+        valid["case_results"][0]["candidate_count"] = serde_json::json!(2);
+        valid["case_results"][0]["failures"] =
+            serde_json::json!([{"code":"unknown_file","finding_index":0}]);
+        valid["case_results"][0]["status"] = serde_json::json!("incomplete");
+        valid["outcome"] = serde_json::json!("rejected");
+        valid["metrics"]["completed_count"] = serde_json::json!(0);
+        valid["metrics"]["incomplete_count"] = serde_json::json!(1);
+        valid["metrics"]["invalid_or_incomplete_rate"] = serde_json::json!(100.0);
+        valid["failed_threshold_ids"] = serde_json::json!(["unavailable_or_incomplete_count"]);
+        let decoded: DiagnosticReport = serde_json::from_value(valid.clone()).unwrap();
+        validate_report(&decoded).unwrap();
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), valid);
+        assert_eq!(decoded.case_results[0].accepted_findings[0].end_line, 8);
+        assert!(stdout_summary(&decoded, Path::new("safe.json")).contains("unknown_file"));
+        ensure_no_forbidden_keys(&valid).unwrap();
+
+        for (pointer, replacement) in [
+            ("/case_results/0/status", serde_json::json!("completed")),
+            ("/case_results/0/status", serde_json::json!("unavailable")),
+            ("/case_results/0/candidate_count", serde_json::json!(null)),
+            ("/case_results/0/candidate_count", serde_json::json!(257)),
+            ("/case_results/0/candidate_count", serde_json::json!(3)),
+            ("/case_results/0/failures", serde_json::json!([])),
+            (
+                "/case_results/0/failures",
+                serde_json::json!([{"code":"unknown_file","finding_index":0},{"code":"reason_size_limit","finding_index":0}]),
+            ),
+            (
+                "/case_results/0/failures/0/code",
+                serde_json::json!("injected-secret-prose"),
+            ),
+            (
+                "/case_results/0/failures/0/code",
+                serde_json::json!("provider_failure"),
+            ),
+            (
+                "/case_results/0/failures/0/code",
+                serde_json::json!("non_stop_finish"),
+            ),
+            (
+                "/case_results/0/failures/0/finding_index",
+                serde_json::json!(2),
+            ),
+            (
+                "/case_results/0/failures/0/finding_index",
+                serde_json::json!(null),
+            ),
+            (
+                "/case_results/0/accepted_findings/0/start_line",
+                serde_json::json!(0),
+            ),
+            (
+                "/case_results/0/accepted_findings/0/end_line",
+                serde_json::json!(6),
+            ),
+        ] {
+            let mut invalid = valid.clone();
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+            assert!(
+                serde_json::from_value::<DiagnosticReport>(invalid)
+                    .map_or(true, |report| validate_report(&report).is_err()),
+                "accepted {pointer}"
+            );
+        }
+        for field in ["candidate_count", "failures"] {
+            let mut invalid = valid.clone();
+            invalid["case_results"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(serde_json::from_value::<DiagnosticReport>(invalid).is_err());
+        }
+        for field in ["code", "finding_index"] {
+            let mut invalid = valid.clone();
+            invalid["case_results"][0]["failures"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+            assert!(serde_json::from_value::<DiagnosticReport>(invalid).is_err());
+        }
+        for field in ["stage", "reason", "raw_response"] {
+            let mut invalid = valid.clone();
+            invalid["case_results"][0]["failures"][0][field] = serde_json::json!("secret-prose");
+            assert!(serde_json::from_value::<DiagnosticReport>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn failure_status_matrix_enforces_origin_count_indexes_and_global_uniqueness() {
+        use AnalysisFailureCode::*;
+        use DiagnosticStatus::*;
+        let global = |code| AnalysisFailure {
+            code,
+            finding_index: None,
+        };
+        for code in [
+            RequestCap,
+            RequestEncoding,
+            RequestSize,
+            CandidateSchema,
+            FindingCountLimit,
+        ] {
+            assert!(validate_case_diagnostics(Incomplete, None, &[global(code)], 0).is_ok());
+            assert!(validate_case_diagnostics(Completed, None, &[global(code)], 0).is_err());
+            assert!(validate_case_diagnostics(Unavailable, None, &[global(code)], 0).is_err());
+            assert!(validate_case_diagnostics(Incomplete, Some(0), &[global(code)], 0).is_err());
+            assert!(
+                validate_case_diagnostics(Incomplete, None, &[global(code), global(code)], 0)
+                    .is_err()
+            );
+            let with_finish = [global(NonStopFinish), global(code)];
+            assert_eq!(
+                validate_case_diagnostics(Incomplete, None, &with_finish, 0).is_ok(),
+                matches!(code, CandidateSchema | FindingCountLimit)
+            );
+        }
+        for code in [CredentialUnavailable, ProviderFailure] {
+            assert!(validate_case_diagnostics(Unavailable, None, &[global(code)], 0).is_ok());
+            assert!(validate_case_diagnostics(Unavailable, Some(0), &[global(code)], 0).is_err());
+            assert!(validate_case_diagnostics(Unavailable, None, &[global(code)], 1).is_err());
+            assert!(validate_case_diagnostics(Incomplete, None, &[global(code)], 0).is_err());
+        }
+        assert!(validate_case_diagnostics(
+            Unavailable,
+            None,
+            &[global(CredentialUnavailable), global(ProviderFailure)],
+            0
+        )
+        .is_err());
+        assert!(validate_case_diagnostics(Incomplete, None, &[global(NonStopFinish)], 0).is_err());
+        assert!(
+            validate_case_diagnostics(Incomplete, Some(0), &[global(NonStopFinish)], 0).is_ok()
+        );
+        assert!(validate_case_diagnostics(
+            Incomplete,
+            Some(0),
+            &[global(NonStopFinish), global(NonStopFinish)],
+            0
+        )
+        .is_err());
+        assert!(validate_case_diagnostics(Completed, Some(0), &[], 0).is_ok());
+        assert!(validate_case_diagnostics(Completed, Some(256), &[], 256).is_ok());
+        assert!(validate_case_diagnostics(Completed, Some(257), &[], 257).is_err());
+        for code in [
+            UnknownFile,
+            InvalidCitationRange,
+            CitationOutOfBounds,
+            EvidenceLineLimit,
+            ReasonSizeLimit,
+            ForbiddenReasonCharacter,
+        ] {
+            let failures = [
+                global(NonStopFinish),
+                AnalysisFailure {
+                    code,
+                    finding_index: Some(1),
+                },
+            ];
+            assert!(validate_case_diagnostics(Incomplete, Some(2), &failures, 1).is_ok());
+            assert!(validate_case_diagnostics(Completed, Some(2), &failures, 1).is_err());
+            assert!(validate_case_diagnostics(Incomplete, Some(1), &failures, 0).is_err());
+        }
     }
 }

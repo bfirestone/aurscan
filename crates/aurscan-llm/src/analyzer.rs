@@ -4,10 +4,10 @@ use crate::grounding::{ground_response, materialize_claims};
 use crate::prompt::{build_request, prompt_hash, response_schema_hash, ProviderRequest};
 use crate::provider::{load_api_key, ModelProvider, OpenAiCompatibleProvider};
 use crate::types::{
-    AnalysisIdentity, AnalysisOutcome, AnalysisSource, AnalysisStatus, AnalyzeOptions,
-    ChatCompletionsProfile, PackageAnalyzer, RecipeBundle, RequestPreflight, LLM_ANALYSIS_EPOCH,
-    MAX_REASON_BYTES, PROMPT_VERSION, PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION,
-    REVIEW_STRATEGY_ID,
+    AnalysisDiagnostics, AnalysisFailure, AnalysisFailureCode, AnalysisIdentity, AnalysisOutcome,
+    AnalysisSource, AnalysisStatus, AnalyzeOptions, ChatCompletionsProfile, PackageAnalyzer,
+    RecipeBundle, RequestPreflight, LLM_ANALYSIS_EPOCH, MAX_REASON_BYTES, PROMPT_VERSION,
+    PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
 };
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -100,6 +100,7 @@ impl Analyzer {
                         "cache miss count {miss_count} exceeds request cap {}",
                         self.config.max_requests_per_run
                     ),
+                    AnalysisFailureCode::RequestCap,
                 ));
             }
             return finish_outcomes(outcomes);
@@ -120,6 +121,7 @@ impl Analyzer {
                         None,
                         pending.identity,
                         "request rendering failed".into(),
+                        AnalysisFailureCode::RequestEncoding,
                     ));
                     continue;
                 }
@@ -134,6 +136,7 @@ impl Analyzer {
                         encoded_body.len(),
                         self.config.max_request_bytes
                     ),
+                    AnalysisFailureCode::RequestSize,
                 ));
                 continue;
             }
@@ -148,6 +151,7 @@ impl Analyzer {
                             None,
                             pending.identity,
                             reason.clone(),
+                            AnalysisFailureCode::CredentialUnavailable,
                         ));
                         for remaining in misses {
                             outcomes[remaining.index] = Some(failure_outcome(
@@ -155,6 +159,7 @@ impl Analyzer {
                                 None,
                                 remaining.identity,
                                 reason.clone(),
+                                AnalysisFailureCode::CredentialUnavailable,
                             ));
                         }
                         return finish_outcomes(outcomes);
@@ -175,12 +180,20 @@ impl Analyzer {
                         Some(AnalysisSource::Provider),
                         pending.identity,
                         error.to_string(),
+                        AnalysisFailureCode::ProviderFailure,
                     ));
                     continue;
                 }
             };
 
             let finish_complete = response.finish_reason == "stop";
+            let mut diagnostics = AnalysisDiagnostics::default();
+            if !finish_complete {
+                diagnostics.failures.push(AnalysisFailure {
+                    code: AnalysisFailureCode::NonStopFinish,
+                    finding_index: None,
+                });
+            }
             let grounded = match ground_response(
                 &response.content,
                 &bundles[pending.index],
@@ -189,15 +202,20 @@ impl Analyzer {
                 self.config.max_excerpt_bytes,
             ) {
                 Ok(grounded) => grounded,
-                Err(reason) => {
+                Err(error) => {
+                    diagnostics.failures.push(AnalysisFailure {
+                        code: error.code,
+                        finding_index: None,
+                    });
                     outcomes[pending.index] = Some(AnalysisOutcome {
                         status: AnalysisStatus::Incomplete,
                         source: Some(AnalysisSource::Provider),
                         findings: Vec::new(),
+                        diagnostics,
                         identity: Some(pending.identity),
                         usage: response.usage,
                         reason: Some(if finish_complete {
-                            reason
+                            error.to_string()
                         } else {
                             "provider response was incomplete".into()
                         }),
@@ -207,7 +225,11 @@ impl Analyzer {
             };
 
             let fully_grounded = grounded.rejected_reasons.is_empty();
-            let findings = materialize_claims(&grounded.claims, &bundles[pending.index].pkgbase);
+            let (findings, finding_spans) =
+                materialize_claims(&grounded.claims, &bundles[pending.index].pkgbase);
+            diagnostics.candidate_count = Some(grounded.candidate_count);
+            diagnostics.finding_spans = finding_spans;
+            diagnostics.failures.extend(grounded.failures);
             if finish_complete && fully_grounded {
                 let completed = CompletedClaims {
                     identity: pending.identity.clone(),
@@ -220,6 +242,7 @@ impl Analyzer {
                     status: AnalysisStatus::Completed,
                     source: Some(AnalysisSource::Provider),
                     findings,
+                    diagnostics,
                     identity: Some(pending.identity),
                     usage: response.usage,
                     reason: None,
@@ -234,6 +257,7 @@ impl Analyzer {
                     status: AnalysisStatus::Incomplete,
                     source: Some(AnalysisSource::Provider),
                     findings,
+                    diagnostics,
                     identity: Some(pending.identity),
                     usage: response.usage,
                     reason: Some(reason),
@@ -275,10 +299,16 @@ fn completed_outcome(
     completed: CompletedClaims,
     source: AnalysisSource,
 ) -> AnalysisOutcome {
+    let (findings, finding_spans) = materialize_claims(&completed.claims, &bundle.pkgbase);
     AnalysisOutcome {
         status: AnalysisStatus::Completed,
         source: Some(source),
-        findings: materialize_claims(&completed.claims, &bundle.pkgbase),
+        findings,
+        diagnostics: AnalysisDiagnostics {
+            candidate_count: Some(completed.claims.len()),
+            failures: Vec::new(),
+            finding_spans,
+        },
         identity: Some(identity),
         usage: completed.usage,
         reason: None,
@@ -290,11 +320,19 @@ fn failure_outcome(
     source: Option<AnalysisSource>,
     identity: AnalysisIdentity,
     reason: String,
+    code: AnalysisFailureCode,
 ) -> AnalysisOutcome {
     AnalysisOutcome {
         status,
         source,
         findings: Vec::new(),
+        diagnostics: AnalysisDiagnostics {
+            failures: vec![AnalysisFailure {
+                code,
+                finding_index: None,
+            }],
+            ..AnalysisDiagnostics::default()
+        },
         identity: Some(identity),
         usage: None,
         reason: Some(reason),

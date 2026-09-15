@@ -221,6 +221,7 @@ pub(crate) fn collect(
                 Err(error) => {
                     for (index, bundle) in ready_indices.iter().copied().zip(&bundles) {
                         prepared[index].analysis = Some(AnalysisOutcome {
+                            diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
                             status: AnalysisStatus::Incomplete,
                             source: None,
                             findings: vec![],
@@ -728,6 +729,7 @@ fn empty_coverage(checkout: &Path) -> BundleCoverage {
 
 fn failure_outcome(status: AnalysisStatus, reason: String) -> AnalysisOutcome {
     AnalysisOutcome {
+        diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
         status,
         source: None,
         findings: vec![],
@@ -810,6 +812,7 @@ mod tests {
 
     fn outcome(status: AnalysisStatus, findings: Vec<Finding>) -> AnalysisOutcome {
         AnalysisOutcome {
+            diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
             status,
             source: Some(AnalysisSource::Provider),
             findings,

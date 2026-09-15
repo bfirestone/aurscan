@@ -11,8 +11,9 @@ use aurscan_core::{compute_verdict, Confidence, Finding, Severity, Verdict, Verd
 use aurscan_llm::{
     validate_config, AnalysisIdentity, AnalysisOutcome, AnalysisSource, AnalysisStatus,
     AnalyzeOptions, Analyzer, ChatCompletionsProfile, DefaultRecipeBundleBuilder, LlmConfig,
-    LlmFindingKind, RecipeBundle, RecipeBundleBuilder, TokenUsage, ValidatedLlmConfig,
-    LLM_ANALYSIS_EPOCH, PROMPT_VERSION, RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
+    LlmFindingKind, RecipeBundle, RecipeBundleBuilder, TokenUsage, ValidatedFindingSpan,
+    ValidatedLlmConfig, LLM_ANALYSIS_EPOCH, PROMPT_VERSION, RESPONSE_SCHEMA_VERSION,
+    REVIEW_STRATEGY_ID,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -538,6 +539,8 @@ fn evaluate_case(
         category: input.category.clone(),
         expected_hit,
         expected_kinds: input.expected_kinds.unwrap_or(&[]).to_vec(),
+        candidate_count: outcome.diagnostics.candidate_count,
+        failures: outcome.diagnostics.failures.clone(),
         accepted_findings: accepted
             .iter()
             .map(|finding| finding.reference.clone())
@@ -571,14 +574,36 @@ fn accepted_findings(
     bundle: &RecipeBundle,
     outcome: &AnalysisOutcome,
 ) -> Result<Vec<AcceptedFinding>> {
+    diagnostic::validate_case_diagnostics(
+        diagnostic_status(outcome.status),
+        outcome.diagnostics.candidate_count,
+        &outcome.diagnostics.failures,
+        outcome.findings.len(),
+    )?;
+    ensure!(
+        outcome.findings.len() == outcome.diagnostics.finding_spans.len(),
+        "concrete analyzer span count disagrees with findings"
+    );
     outcome
         .findings
         .iter()
-        .map(|finding| accepted_finding(bundle, finding))
+        .zip(&outcome.diagnostics.finding_spans)
+        .enumerate()
+        .map(|(index, (finding, span))| {
+            ensure!(
+                span.finding_index == index,
+                "concrete analyzer span order disagrees with findings"
+            );
+            accepted_finding(bundle, finding, span)
+        })
         .collect()
 }
 
-fn accepted_finding(bundle: &RecipeBundle, finding: &Finding) -> Result<AcceptedFinding> {
+fn accepted_finding(
+    bundle: &RecipeBundle,
+    finding: &Finding,
+    span: &ValidatedFindingSpan,
+) -> Result<AcceptedFinding> {
     ensure!(
         finding.confidence == Confidence::Llm,
         "concrete LLM analyzer returned a non-LLM finding"
@@ -600,16 +625,16 @@ fn accepted_finding(bundle: &RecipeBundle, finding: &Finding) -> Result<Accepted
         .iter()
         .find(|candidate| candidate.path == relative_file)
         .ok_or_else(|| anyhow!("accepted LLM finding refers outside its bundle"))?;
-    let excerpt_lines = finding
-        .evidence
-        .excerpt
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        .saturating_add(1);
-    let end_line = start_line.saturating_add(excerpt_lines - 1);
     ensure!(
-        start_line > 0 && end_line <= host_line_count(&file.content),
+        span.kind.detector_id() == finding.detector
+            && span.severity == finding.severity
+            && span.relative_file == relative_file
+            && span.start_line == start_line,
+        "concrete analyzer span identity disagrees with finding"
+    );
+    let end_line = span.end_line;
+    ensure!(
+        start_line > 0 && start_line <= end_line && end_line <= host_line_count(&file.content),
         "accepted LLM finding refers to lines outside its bundle"
     );
     Ok(AcceptedFinding {
@@ -673,7 +698,7 @@ fn finalize_run(
     let generated_at = unix_epoch_seconds()?;
     let git_commit = corpus::git_rev_parse_head()?;
     let report = DiagnosticReport {
-        schema_version: 1,
+        schema_version: 2,
         run_kind,
         outcome,
         failed_threshold_ids: failed_threshold_ids.clone(),
@@ -862,7 +887,7 @@ fn verify_promotion_bytes(
         serde_json::from_value(value).context("promotion diagnostic schema is invalid")?;
     diagnostic::validate_report(&report)?;
     ensure!(
-        report.schema_version == 1,
+        report.schema_version == 2,
         "promotion diagnostic schema changed"
     );
     ensure!(
@@ -1945,7 +1970,7 @@ mod tests {
     fn promotion_report(identity: &RunIdentity, data: &CorpusData) -> DiagnosticReport {
         let selected_case_ids = corpus::expected_calibration_ids();
         DiagnosticReport {
-            schema_version: 1,
+            schema_version: 2,
             run_kind: RunKind::Calibration,
             outcome: RunOutcome::Passed,
             failed_threshold_ids: Vec::new(),
@@ -1977,7 +2002,7 @@ mod tests {
                     let expected_kinds =
                         manifest_case.map_or_else(Vec::new, |case| case.expected_kinds.clone());
                     let expected_hit = index < CALIBRATION_SEMANTIC_HITS;
-                    let accepted_findings = expected_hit
+                    let accepted_findings: Vec<_> = expected_hit
                         .then(|| {
                             let evidence = &manifest_case.unwrap().allowed_evidence[0];
                             DiagnosticFindingRef {
@@ -1995,6 +2020,8 @@ mod tests {
                         category: category.to_owned(),
                         expected_hit,
                         expected_kinds,
+                        candidate_count: Some(accepted_findings.len()),
+                        failures: Vec::new(),
                         accepted_findings,
                         grounded: true,
                         status: DiagnosticStatus::Completed,
@@ -2228,7 +2255,7 @@ max_requests_per_run = 100
         let mut mismatches = Vec::new();
 
         let mut changed = base.clone();
-        changed.schema_version = 2;
+        changed.schema_version = 1;
         mismatches.push(changed);
         let mut changed = base.clone();
         changed.run_kind = RunKind::Qualification;
@@ -2998,5 +3025,170 @@ max_requests_per_run = 100
         assert!(result.is_err());
         assert_eq!(fs::read(&output).unwrap(), b"racing-first-writer\n");
         assert!(!temporary.path().join("v1.json.candidate").exists());
+    }
+    fn synthetic_span_outcome() -> (RecipeBundle, AnalysisOutcome) {
+        use aurscan_llm::{
+            AnalysisDiagnostics, BundleCoverage, CoverageMode, RecipeFile, ValidatedFindingSpan,
+        };
+        let bundle = RecipeBundle {
+            pkgbase: "synthetic".into(),
+            aur_commit: None,
+            content_hash: [0; 32],
+            files: vec![RecipeFile {
+                path: "PKGBUILD".into(),
+                content: "one\ntwo\nthree\nfour\n".into(),
+            }],
+            coverage: BundleCoverage {
+                mode: CoverageMode::GitTracked,
+                included_files: 1,
+                excluded_binary_files: vec![],
+                excluded_symlinks: vec![],
+            },
+        };
+        let kinds = [
+            LlmFindingKind::DownloadExecute,
+            LlmFindingKind::OtherSemantic,
+        ];
+        let findings = kinds
+            .iter()
+            .map(|kind| Finding {
+                severity: Severity::High,
+                confidence: Confidence::Llm,
+                detector: kind.detector_id(),
+                package: "synthetic".into(),
+                reason: "secret-prose-sentinel".into(),
+                evidence: aurscan_core::Evidence {
+                    location: "PKGBUILD:1".into(),
+                    excerpt: "o".into(),
+                },
+            })
+            .collect();
+        let finding_spans = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(finding_index, kind)| ValidatedFindingSpan {
+                finding_index,
+                kind,
+                severity: Severity::High,
+                relative_file: "PKGBUILD".into(),
+                start_line: 1,
+                end_line: 3 + finding_index,
+            })
+            .collect();
+        (
+            bundle,
+            AnalysisOutcome {
+                status: AnalysisStatus::Completed,
+                source: Some(AnalysisSource::Provider),
+                findings,
+                diagnostics: AnalysisDiagnostics {
+                    candidate_count: Some(2),
+                    failures: vec![],
+                    finding_spans,
+                },
+                identity: None,
+                usage: None,
+                reason: None,
+            },
+        )
+    }
+
+    #[test]
+    fn accepted_spans_are_exact_and_fail_closed_on_malformed_metadata() {
+        let (bundle, outcome) = synthetic_span_outcome();
+        let accepted = accepted_findings(&bundle, &outcome).unwrap();
+        assert_eq!(accepted[0].reference.end_line, 3);
+        assert_eq!(accepted[1].reference.end_line, 4);
+        let mut invalid = Vec::new();
+        let mut changed = outcome.clone();
+        changed.diagnostics.finding_spans.pop();
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed
+            .diagnostics
+            .finding_spans
+            .push(changed.diagnostics.finding_spans[0].clone());
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed.diagnostics.finding_spans.swap(0, 1);
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed.diagnostics.finding_spans[0].kind = LlmFindingKind::CredentialAccess;
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed.diagnostics.finding_spans[0].severity = Severity::Info;
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed.diagnostics.finding_spans[0].relative_file = "outside".into();
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed.diagnostics.finding_spans[0].start_line = 2;
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed.diagnostics.finding_spans[0].end_line = 5;
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed.diagnostics.finding_spans[0].end_line = 0;
+        invalid.push(changed);
+        let mut changed = outcome.clone();
+        changed.diagnostics.candidate_count = Some(3);
+        invalid.push(changed);
+        for changed in invalid {
+            assert!(accepted_findings(&bundle, &changed).is_err());
+        }
+    }
+
+    #[test]
+    fn legacy_and_inconsistent_v2_stop_at_actual_pre_key_boundary() {
+        let data = corpus::load_and_validate(&corpus::workspace_root().unwrap()).unwrap();
+        let identity = promotion_identity(&data);
+        let base = serde_json::to_value(promotion_report(&identity, &data)).unwrap();
+        let mut legacy = base.clone();
+        legacy["schema_version"] = serde_json::json!(1);
+        for case in legacy["case_results"].as_array_mut().unwrap() {
+            case.as_object_mut().unwrap().remove("candidate_count");
+            case.as_object_mut().unwrap().remove("failures");
+        }
+        let mut malformed = base.clone();
+        malformed["case_results"][0]["failures"] =
+            serde_json::json!([{"code":"unknown_file","finding_index":0}]);
+        let mut missing = base.clone();
+        missing["case_results"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("candidate_count");
+        for invalid in [legacy, malformed, missing] {
+            let bytes = serde_json::to_vec(&invalid).unwrap();
+            assert_qualification_stops_before_boundaries(
+                &bytes,
+                &diagnostic::sha256_hex(&bytes),
+                &identity,
+                &data,
+            );
+        }
+    }
+
+    #[test]
+    fn semantic_scoring_uses_start_line_even_when_exact_span_overlaps_allowed_range() {
+        let data = corpus::load_and_validate(&corpus::workspace_root().unwrap()).unwrap();
+        let identity = promotion_identity(&data);
+        let mut report = promotion_report(&identity, &data);
+        let case = &mut report.case_results[0];
+        let allowed = &data
+            .manifest
+            .cases
+            .iter()
+            .find(|entry| entry.id == case.id)
+            .unwrap()
+            .allowed_evidence[0];
+        assert!(allowed.start_line_min > 1);
+        case.accepted_findings[0].start_line = allowed.start_line_min - 1;
+        case.accepted_findings[0].end_line = allowed.end_line_max;
+        let bytes = serde_json::to_vec(&report).unwrap();
+        // Keeping the asserted hit must be rejected despite overlap and matching kind.
+        let error =
+            verify_promotion_bytes(&bytes, &diagnostic::sha256_hex(&bytes), &identity, &data)
+                .unwrap_err();
+        assert!(error.to_string().contains("expected-hit claim"));
     }
 }

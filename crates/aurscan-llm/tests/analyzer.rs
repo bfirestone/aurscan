@@ -1,8 +1,8 @@
 use aurscan_llm::{
-    validate_config, AnalysisSource, AnalysisStatus, AnalyzeOptions, Analyzer, BundleCoverage,
-    ChatCompletionsProfile, CoverageMode, LlmConfig, RecipeBundle, RecipeFile, RequestPreflight,
-    ResponseFormat, LLM_ANALYSIS_EPOCH, PROMPT_VERSION, PROVIDER_PROTOCOL_VERSION,
-    RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
+    validate_config, AnalysisFailureCode, AnalysisSource, AnalysisStatus, AnalyzeOptions, Analyzer,
+    BundleCoverage, ChatCompletionsProfile, CoverageMode, LlmConfig, RecipeBundle, RecipeFile,
+    RequestPreflight, ResponseFormat, LLM_ANALYSIS_EPOCH, PROMPT_VERSION,
+    PROVIDER_PROTOCOL_VERSION, RESPONSE_SCHEMA_VERSION, REVIEW_STRATEGY_ID,
 };
 use serde_json::json;
 use std::io::{Read, Write};
@@ -447,6 +447,14 @@ fn missing_key_with_any_miss_sends_zero_new_requests() {
     assert_eq!(outcomes[0].source, Some(AnalysisSource::Cache));
     assert_eq!(outcomes[1].status, AnalysisStatus::Unavailable);
     assert!(outcomes[1].reason.as_deref().unwrap().contains(variable));
+    assert_eq!(
+        outcomes[1].diagnostics.failures[0].code,
+        AnalysisFailureCode::CredentialUnavailable
+    );
+    assert_eq!(outcomes[1].diagnostics.candidate_count, None);
+    assert!(!serde_json::to_string(&outcomes[1].diagnostics)
+        .unwrap()
+        .contains(variable));
 }
 
 #[test]
@@ -469,6 +477,10 @@ fn too_many_batch_misses_performs_zero_provider_calls() {
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
     ));
     assert_eq!(outcomes.len(), 2);
+    assert!(outcomes
+        .iter()
+        .all(|outcome| outcome.diagnostics.candidate_count.is_none()
+            && outcome.diagnostics.failures[0].code == AnalysisFailureCode::RequestCap));
     assert!(outcomes
         .iter()
         .all(|outcome| outcome.status == AnalysisStatus::Incomplete));
@@ -504,6 +516,12 @@ fn encoded_request_over_limit_is_incomplete_without_a_call() {
         .as_deref()
         .unwrap()
         .contains("encoded request size"));
+    assert_eq!(
+        outcomes[0].diagnostics.failures[0].code,
+        AnalysisFailureCode::RequestSize
+    );
+    assert_eq!(outcomes[0].diagnostics.failures[0].finding_index, None);
+    assert_eq!(outcomes[0].diagnostics.candidate_count, None);
 }
 
 #[test]
@@ -761,4 +779,44 @@ fn preflight_size_tracks_canonical_body_inputs() {
         baseline,
         preflight_encoded_size(baseline_config, &changed_file_path)
     );
+}
+
+#[test]
+fn provider_send_and_envelope_errors_have_one_broad_safe_code() {
+    for (status, body) in [
+        ("503 Unavailable", "secret-provider-sentinel"),
+        ("200 OK", "secret-provider-sentinel"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            consume_request(&mut stream);
+            write_response(&mut stream, status, body);
+            listener.set_nonblocking(true).unwrap();
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        });
+        let dir = TempDir::new().unwrap();
+        let outcome = analyzer_at(analyzer_config(&origin), &dir)
+            .analyze_batch(
+                &[recipe_bundle(20, "failure")],
+                AnalyzeOptions { refresh: false },
+            )
+            .remove(0);
+        join.join().unwrap();
+        assert_eq!(outcome.status, AnalysisStatus::Unavailable);
+        assert_eq!(outcome.diagnostics.candidate_count, None);
+        assert_eq!(
+            outcome.diagnostics.failures,
+            vec![aurscan_llm::AnalysisFailure {
+                code: AnalysisFailureCode::ProviderFailure,
+                finding_index: None
+            }]
+        );
+        assert!(!serde_json::to_string(&outcome.diagnostics)
+            .unwrap()
+            .contains("secret-provider-sentinel"));
+    }
 }

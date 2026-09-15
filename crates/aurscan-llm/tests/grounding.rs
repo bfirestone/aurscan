@@ -38,6 +38,14 @@ fn run(candidate: Value, configure: impl FnOnce(&mut LlmConfig)) -> AnalysisOutc
 }
 
 fn run_raw(content: String, configure: impl FnOnce(&mut LlmConfig)) -> AnalysisOutcome {
+    run_raw_finish(content, configure, "stop")
+}
+
+fn run_raw_finish(
+    content: String,
+    configure: impl FnOnce(&mut LlmConfig),
+    finish: &'static str,
+) -> AnalysisOutcome {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let join = thread::spawn(move || {
@@ -68,7 +76,7 @@ fn run_raw(content: String, configure: impl FnOnce(&mut LlmConfig)) -> AnalysisO
         let body = json!({
             "choices": [{
                 "message": {"content": content},
-                "finish_reason": "stop"
+                "finish_reason": finish
             }]
         })
         .to_string();
@@ -97,6 +105,17 @@ fn run_raw(content: String, configure: impl FnOnce(&mut LlmConfig)) -> AnalysisO
         .analyze_batch(&[bundle()], AnalyzeOptions { refresh: false })
         .remove(0);
     join.join().unwrap();
+    if outcome.status == AnalysisStatus::Completed {
+        let cached = analyzer
+            .analyze_batch(&[bundle()], AnalyzeOptions { refresh: false })
+            .remove(0);
+        assert_eq!(cached.source, Some(aurscan_llm::AnalysisSource::Cache));
+        assert_eq!(cached.diagnostics, outcome.diagnostics);
+        assert_eq!(
+            serde_json::to_value(&cached.findings).unwrap(),
+            serde_json::to_value(&outcome.findings).unwrap()
+        );
+    }
     outcome
 }
 
@@ -357,4 +376,135 @@ fn excerpt_cap_never_splits_utf8_and_uses_original_content() {
     assert_eq!(outcome.status, AnalysisStatus::Completed);
     assert_eq!(outcome.findings[0].evidence.excerpt, "last=é");
     assert!(outcome.findings[0].evidence.excerpt.len() <= 8);
+}
+
+#[test]
+fn diagnostics_classify_origin_without_model_text() {
+    use aurscan_llm::AnalysisFailureCode::*;
+    let sentinel = "secret-prose-sentinel";
+    let cases = [
+        (
+            finding("outside-secret-prose-sentinel", 1, 1, sentinel),
+            UnknownFile,
+        ),
+        (finding("PKGBUILD", 0, 1, sentinel), InvalidCitationRange),
+        (finding("PKGBUILD", 3, 2, sentinel), InvalidCitationRange),
+        (finding("PKGBUILD", 1, 99, sentinel), CitationOutOfBounds),
+        (finding("PKGBUILD", 1, 4, sentinel), EvidenceLineLimit),
+        (
+            finding("PKGBUILD", 1, 1, &sentinel.repeat(30)),
+            ReasonSizeLimit,
+        ),
+        (
+            finding("PKGBUILD", 1, 1, &format!("{sentinel}\n")),
+            ForbiddenReasonCharacter,
+        ),
+    ];
+    for (candidate, code) in cases {
+        let outcome = run(json!({"findings": [candidate]}), |config| {
+            config.max_evidence_lines = 3
+        });
+        assert_eq!(outcome.diagnostics.candidate_count, Some(1));
+        assert_eq!(
+            outcome.diagnostics.failures,
+            vec![aurscan_llm::AnalysisFailure {
+                code,
+                finding_index: Some(0)
+            }]
+        );
+        assert!(!serde_json::to_string(&outcome.diagnostics)
+            .unwrap()
+            .contains(sentinel));
+    }
+    let malformed = run_raw(sentinel.into(), |_| {});
+    assert_eq!(malformed.diagnostics.candidate_count, None);
+    assert_eq!(malformed.diagnostics.failures[0].code, CandidateSchema);
+    assert_eq!(malformed.diagnostics.failures[0].finding_index, None);
+    let candidate = finding("PKGBUILD", 1, 1, sentinel);
+    let excess = run(
+        json!({"findings": [candidate.clone(), candidate]}),
+        |config| config.max_findings = 1,
+    );
+    assert_eq!(excess.diagnostics.candidate_count, None);
+    assert_eq!(excess.diagnostics.failures[0].code, FindingCountLimit);
+}
+
+#[test]
+fn original_spans_survive_clipping_partial_grounding_and_cache() {
+    for partial in [false, true] {
+        let valid = finding("PKGBUILD", 2, 4, "hostile-prose-sentinel");
+        let candidates = if partial {
+            vec![finding("outside", 1, 1, "bad"), valid]
+        } else {
+            vec![valid]
+        };
+        let outcome = run(json!({"findings": candidates}), |config| {
+            config.max_excerpt_bytes = 5
+        });
+        assert_eq!(
+            outcome.status,
+            if partial {
+                AnalysisStatus::Incomplete
+            } else {
+                AnalysisStatus::Completed
+            }
+        );
+        assert_eq!(outcome.findings.len(), 1);
+        assert_eq!(outcome.findings[0].evidence.excerpt, "prepa");
+        assert_eq!(
+            outcome.diagnostics.candidate_count,
+            Some(if partial { 2 } else { 1 })
+        );
+        let span = &outcome.diagnostics.finding_spans[0];
+        assert_eq!(span.finding_index, 0);
+        assert_eq!(span.kind, aurscan_llm::LlmFindingKind::DownloadExecute);
+        assert_eq!(span.severity, Severity::High);
+        assert_eq!(span.relative_file, "PKGBUILD");
+        assert_eq!((span.start_line, span.end_line), (2, 4));
+        assert!(!serde_json::to_string(&outcome.diagnostics)
+            .unwrap()
+            .contains("hostile-prose-sentinel"));
+        if partial {
+            assert_eq!(outcome.diagnostics.failures[0].finding_index, Some(0));
+        }
+    }
+}
+
+#[test]
+fn non_stop_finish_preserves_concurrent_structural_and_grounding_codes() {
+    use aurscan_llm::AnalysisFailureCode::*;
+    for (content, expected, count) in [
+        (
+            "invalid".to_owned(),
+            vec![NonStopFinish, CandidateSchema],
+            None,
+        ),
+        (
+            json!({"findings": [finding("outside", 1, 1, "bad")]}).to_string(),
+            vec![NonStopFinish, UnknownFile],
+            Some(1),
+        ),
+        (
+            json!({"findings": []}).to_string(),
+            vec![NonStopFinish],
+            Some(0),
+        ),
+    ] {
+        let outcome = run_raw_finish(content, |_| {}, "length");
+        assert_eq!(outcome.status, AnalysisStatus::Incomplete);
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("provider response was incomplete")
+        );
+        assert_eq!(outcome.diagnostics.candidate_count, count);
+        assert_eq!(
+            outcome
+                .diagnostics
+                .failures
+                .iter()
+                .map(|failure| failure.code)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }

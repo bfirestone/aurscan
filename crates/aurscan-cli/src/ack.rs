@@ -625,6 +625,7 @@ mod tests {
                     features: vec![],
                 },
                 analysis: AnalysisOutcome {
+                    diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
                     status: AnalysisStatus::Incomplete,
                     source: None,
                     findings: vec![],
@@ -665,6 +666,7 @@ mod tests {
                     features: vec![],
                 },
                 analysis: AnalysisOutcome {
+                    diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
                     status: AnalysisStatus::Completed,
                     source: None,
                     findings: vec![],

@@ -1680,4 +1680,23 @@ mod tests {
         assert!(decode_base64("not-base64").is_none());
         assert!(decode_base64("AAAA=AAA").is_none());
     }
+
+    #[test]
+    fn schema_forgery_oracle_describes_only_the_empty_privileged_file() {
+        let oracle = fs::read_to_string(
+            workspace_root()
+                .unwrap()
+                .join("crates/aurscan-llm/eval/ORACLE.md"),
+        )
+        .unwrap();
+        let row = oracle
+            .lines()
+            .find(|line| line.starts_with("| `schema-forgery` |"))
+            .unwrap();
+        assert!(row.contains("creates or truncates an empty privileged file"));
+        assert!(row.contains("No functional cron schedule is installed"));
+        assert!(!row.contains("writes a cron entry"));
+        // Existing exact-byte decoding assertions bind /dev/null and the guard.
+        load_and_validate(&workspace_root().unwrap()).unwrap();
+    }
 }

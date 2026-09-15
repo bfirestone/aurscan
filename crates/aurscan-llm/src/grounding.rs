@@ -1,4 +1,7 @@
-use crate::types::{LlmFindingKind, RecipeBundle, MAX_REASON_BYTES};
+use crate::types::{
+    AnalysisFailure, AnalysisFailureCode, LlmFindingKind, RecipeBundle, ValidatedFindingSpan,
+    MAX_REASON_BYTES,
+};
 use aurscan_core::{Confidence, Evidence, Finding, Severity};
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +57,29 @@ pub(crate) struct GroundedClaim {
 pub(crate) struct GroundingResult {
     pub(crate) claims: Vec<GroundedClaim>,
     pub(crate) rejected_reasons: Vec<String>,
+    pub(crate) failures: Vec<AnalysisFailure>,
+    pub(crate) candidate_count: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct GroundingError {
+    pub(crate) code: AnalysisFailureCode,
+    reason: String,
+}
+
+impl GroundingError {
+    fn new(code: AnalysisFailureCode, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for GroundingError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.reason)
+    }
 }
 
 pub(crate) fn ground_response(
@@ -62,27 +88,44 @@ pub(crate) fn ground_response(
     max_findings: usize,
     max_evidence_lines: usize,
     max_excerpt_bytes: usize,
-) -> Result<GroundingResult, String> {
-    let candidate: CandidateResponse = serde_json::from_str(content)
-        .map_err(|_| "candidate response was structurally invalid".to_owned())?;
+) -> Result<GroundingResult, GroundingError> {
+    let candidate: CandidateResponse = serde_json::from_str(content).map_err(|_| {
+        GroundingError::new(
+            AnalysisFailureCode::CandidateSchema,
+            "candidate response was structurally invalid",
+        )
+    })?;
     if candidate.findings.len() > max_findings {
-        return Err(format!(
-            "candidate finding count {} exceeds limit {max_findings}",
-            candidate.findings.len()
+        return Err(GroundingError::new(
+            AnalysisFailureCode::FindingCountLimit,
+            format!(
+                "candidate finding count {} exceeds limit {max_findings}",
+                candidate.findings.len()
+            ),
         ));
     }
 
-    let mut claims = Vec::with_capacity(candidate.findings.len());
+    let candidate_count = candidate.findings.len();
+    let mut claims = Vec::with_capacity(candidate_count);
+    let mut failures = Vec::new();
     let mut rejected_reasons = Vec::new();
     for (index, finding) in candidate.findings.into_iter().enumerate() {
         match ground_finding(finding, bundle, max_evidence_lines, max_excerpt_bytes) {
             Ok(claim) => claims.push(claim),
-            Err(reason) => rejected_reasons.push(format!("finding {}: {reason}", index + 1)),
+            Err(error) => {
+                failures.push(AnalysisFailure {
+                    code: error.code,
+                    finding_index: Some(index),
+                });
+                rejected_reasons.push(format!("finding {}: {error}", index + 1));
+            }
         }
     }
     Ok(GroundingResult {
         claims,
         rejected_reasons,
+        failures,
+        candidate_count,
     })
 }
 
@@ -91,30 +134,44 @@ fn ground_finding(
     bundle: &RecipeBundle,
     max_evidence_lines: usize,
     max_excerpt_bytes: usize,
-) -> Result<GroundedClaim, String> {
+) -> Result<GroundedClaim, GroundingError> {
     let file = bundle
         .files
         .iter()
         .find(|file| file.path == finding.file)
-        .ok_or_else(|| "unknown file citation".to_owned())?;
+        .ok_or_else(|| {
+            GroundingError::new(AnalysisFailureCode::UnknownFile, "unknown file citation")
+        })?;
     if finding.start_line == 0 || finding.end_line == 0 {
-        return Err("line numbers must be positive".into());
+        return Err(GroundingError::new(
+            AnalysisFailureCode::InvalidCitationRange,
+            "line numbers must be positive",
+        ));
     }
     if finding.start_line > finding.end_line {
-        return Err("line range must be ordered".into());
+        return Err(GroundingError::new(
+            AnalysisFailureCode::InvalidCitationRange,
+            "line range must be ordered",
+        ));
     }
     let lines = line_byte_ranges(&file.content);
     if finding.end_line > lines.len() {
-        return Err(format!(
-            "line range ends at {}, but file has {} lines",
-            finding.end_line,
-            lines.len()
+        return Err(GroundingError::new(
+            AnalysisFailureCode::CitationOutOfBounds,
+            format!(
+                "line range ends at {}, but file has {} lines",
+                finding.end_line,
+                lines.len()
+            ),
         ));
     }
     let range_length = finding.end_line - finding.start_line + 1;
     if range_length > max_evidence_lines {
-        return Err(format!(
-            "evidence range has {range_length} lines, exceeding limit {max_evidence_lines}"
+        return Err(GroundingError::new(
+            AnalysisFailureCode::EvidenceLineLimit,
+            format!(
+                "evidence range has {range_length} lines, exceeding limit {max_evidence_lines}"
+            ),
         ));
     }
     validate_reason(&finding.reason)?;
@@ -133,17 +190,23 @@ fn ground_finding(
     })
 }
 
-fn validate_reason(reason: &str) -> Result<(), String> {
+fn validate_reason(reason: &str) -> Result<(), GroundingError> {
     if reason.len() > MAX_REASON_BYTES {
-        return Err(format!("reason exceeds {MAX_REASON_BYTES}-byte limit"));
+        return Err(GroundingError::new(
+            AnalysisFailureCode::ReasonSizeLimit,
+            format!("reason exceeds {MAX_REASON_BYTES}-byte limit"),
+        ));
     }
     if let Some(character) = reason
         .chars()
         .find(|character| is_forbidden_reason_char(*character))
     {
-        return Err(format!(
-            "reason contains forbidden control character U+{:04X}",
-            character as u32
+        return Err(GroundingError::new(
+            AnalysisFailureCode::ForbiddenReasonCharacter,
+            format!(
+                "reason contains forbidden control character U+{:04X}",
+                character as u32
+            ),
         ));
     }
     Ok(())
@@ -196,19 +259,37 @@ fn cap_utf8(value: &str, maximum_bytes: usize) -> &str {
     &value[..end]
 }
 
-pub(crate) fn materialize_claims(claims: &[GroundedClaim], package: &str) -> Vec<Finding> {
+/// Materialize each claim and its original span together. Both vectors have
+/// identical length and order, including repeated file/start coordinates.
+pub(crate) fn materialize_claims(
+    claims: &[GroundedClaim],
+    package: &str,
+) -> (Vec<Finding>, Vec<ValidatedFindingSpan>) {
     claims
         .iter()
-        .map(|claim| Finding {
-            severity: claim.severity.materialize(),
-            confidence: Confidence::Llm,
-            detector: claim.kind.detector_id(),
-            package: package.to_owned(),
-            reason: claim.reason.clone(),
-            evidence: Evidence {
-                location: format!("{}:{}", claim.relative_path, claim.start_line),
-                excerpt: claim.excerpt.clone(),
-            },
+        .enumerate()
+        .map(|(finding_index, claim)| {
+            (
+                Finding {
+                    severity: claim.severity.materialize(),
+                    confidence: Confidence::Llm,
+                    detector: claim.kind.detector_id(),
+                    package: package.to_owned(),
+                    reason: claim.reason.clone(),
+                    evidence: Evidence {
+                        location: format!("{}:{}", claim.relative_path, claim.start_line),
+                        excerpt: claim.excerpt.clone(),
+                    },
+                },
+                ValidatedFindingSpan {
+                    finding_index,
+                    kind: claim.kind,
+                    severity: claim.severity.materialize(),
+                    relative_file: claim.relative_path.clone(),
+                    start_line: claim.start_line,
+                    end_line: claim.end_line,
+                },
+            )
         })
-        .collect()
+        .unzip()
 }

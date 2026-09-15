@@ -3,7 +3,7 @@
 **Last updated:** 2026-09-15  
 **Repository:** `aur_package_scanner`  
 **Branch:** `feat/add-llm-integration`  
-**Accepted implementation:** `3807dd4008f5dceb2faf85968e4478df5c9e7143`\
+**Accepted foundation implementation:** `3807dd4008f5dceb2faf85968e4478df5c9e7143`\
 **Foundation status:** independently accepted, published, and closed
 
 ## Start Here
@@ -15,10 +15,10 @@ Read AGENTS.md and HANDOFF.md completely. Run `arc prime` using the new
 session's own session ID. Foundation aurscan-0qag.01vn62.1.9.3 is accepted,
 published, and closed at implementation commit 3807dd4 under approved
 plan.056dgb. Read its completion evidence and permanent parent design
-aurscan-0qag.01vn62.1.9, which remains open. Inspect promotion-preflight task
-aurscan-0qag.01vn62.1.9.4 and its configuration, consent, and authorization
-requirements before any operational run. Dependency readiness does not
-authorize a paid run; this implementation request authorized none.
+aurscan-0qag.01vn62.1.9, which remains open. Read rejected promotion-preflight task aurscan-0qag.01vn62.1.9.4 and diagnostic
+correction task aurscan-0qag.01vn62.1.9.6. Preflight and qualification remain
+blocked. Another paid calibration requires a new approved design and explicit
+operational authorization; these diagnostic corrections authorize no live run.
 ```
 
 Useful commands:
@@ -44,7 +44,19 @@ The probe's identity check and pathname unlink remain separate. Every same-accou
 
 The five new offline regressions cover lock release/reacquisition, a regular-file replacement installed before validation, missing entries, symlink/directory rejection, and stale-probe preservation. Independent code and specification reviews accepted the implementation; the isolated evaluator passed all 11 authored tests. The signed implementation commit was pushed and origin synchronization verified before this handoff-only update.
 
-Parent epic `.1.9` remains open. Promotion preflight `.1.9.4` is ready by dependencies, but was neither run nor authorized by this implementation request. No provider-backed calibration or qualification was run in this session, and no accepted reference report exists.
+Parent epic `.1.9` remains open. The single owner-approved 17-case `gpt-5.6-sol` / `openai_reasoning_none` preflight ran at `ee6aa25dde3ec9ff5a8ccc41c8a7429e0c23b3e0` and was **rejected**: 1/7 strict semantic hits (6/7 required), 16 completed, 1 incomplete, 16 provider requests and 1 cache hit. Retained-finding grounding was 100%, paired drop 0 points, benign Advisories 0/10, and LLM Blocks 0. Preflight `.1.9.4` and qualification `.1.5` remain blocked. No accepted reference report exists.
+
+The retained private schema1 diagnostic has SHA-256 `5e515899252d2b109fd69cf26eba36e5a181f4da0fd66ba9d96a697feafef378`. It remains unchanged historical evidence. Its incomplete cause was discarded by the old harness and cannot be recovered; old clipped ends must not be relabeled as original citation ends. Four strict misses were matching-kind evidence-start mismatches. The kind-plus-start-line scoring rule and failed completion gate remain unchanged.
+
+### Diagnostic correction `.1.9.6`
+
+The owner authorized safe diagnostic fidelity and oracle wording fixes, offline verification, review, commit, and publication. The additive concrete-analyzer metadata now records source-origin failure codes, original candidate counts and indexed rejections, and exact validated finding spans in materialization order. Display excerpts and existing CLI JSON remain unchanged. Provider, completed-cache, and partial-grounding paths share span materialization.
+
+New local diagnostics use **schema2** with required `candidate_count` and `failures` fields per case. Failure indexes refer to the original candidate array; retained span indexes refer to the materialized findings. `grounded` means all retained findings were grounded, including retained findings from incomplete cases; it does not imply case completion. Only host-defined codes and validated coordinates reach diagnostics and stdout. Missing or inconsistent counts/indexes/status metadata and legacy schema1 promotion files fail before credential/provider access. Legacy artifacts are never rewritten or assigned fabricated metadata.
+
+The schema-forgery oracle now describes guarded creation/truncation of an empty privileged file under `/etc/cron.d` from `/dev/null`. No functional cron schedule is installed. Fixture bytes, expected kinds, and evidence ranges remain unchanged; the corrected oracle naturally changes oracle and analysis-contract hashes, invalidating old promotion identity. Model response schema1, prompt2, epoch1, profile wire semantics, and thresholds remain unchanged.
+
+Offline implementation gates have passed; independent acceptance and publication remain pending. This handoff does not predeclare task closure. Another paid calibration requires a new approved design plus explicit owner authorization. Qualification additionally requires a valid passed preflight and separate authorization. New model-facing taxonomy, prompts, model/profile choices, and tuning remain future design work.
 
 ## Non-Negotiable Product Contracts
 
@@ -69,7 +81,7 @@ Parent epic `.1.9` remains open. Promotion preflight `.1.9.4` is ready by depend
 
 The local plan file exists but is ignored by the user's global Git ignore rule (`docs/plans/*`). The complete approved design and all subsequent execution amendments are preserved in the Arc epic/task descriptions.
 
-The foundation task's **Current Execution Amendment** is the current two-file implementation contract. Earlier broad file lists and redesign-stop instructions remain history; the owner authorized this implementation after the cleanup design was approved. Design and planning critiques do not constitute implementation acceptance.
+The foundation task's cleanup amendment remains the accepted probe contract. The current correction contract is the **Authorized diagnostic corrections** amendment and binding planning resolutions in `.1.9`, implemented by `.1.9.6`. Earlier redesign-stop instructions are superseded only for these authorized diagnostic fixes. Design and planning critiques do not constitute implementation acceptance.
 
 The approved sequence is:
 
@@ -85,7 +97,8 @@ The approved sequence is:
 |---|---|---|---|
 | `aurscan-0qag.01vn62.1.9` | **open** | Remediation epic | Keep open while operational work/T4 remain unresolved |
 | `aurscan-0qag.01vn62.1.9.3` | **closed**, `high-risk` | Correct oracle and land modular promotion harness | Accepted and published at `3807dd4`; dependency satisfied |
-| `aurscan-0qag.01vn62.1.9.4` | open, ready by dependencies, `devops` | One paid 17-case promotion preflight | Configuration, consent, and operational authorization still required; not run |
+| `aurscan-0qag.01vn62.1.9.4` | **blocked**, `devops` | Rejected paid 17-case promotion preflight | 1/7 strict hits and 1 incomplete; new design and authorization required before another run |
+| `aurscan-0qag.01vn62.1.9.6` | in progress | Diagnostic fidelity and oracle correction | Offline implementation; independent acceptance and publication pending |
 | `aurscan-0qag.01vn62.1.5` | blocked, `devops` | One conditional 57-case qualification and accepted report | Depends on `.1.9.4`; do not run |
 | `aurscan-0qag.01vn62.1.7` | **closed**, `docs-only` | Experimental LLM usage documentation | Completed at `ef538d3` |
 | `aurscan-0qag.01vn62.1.9.5` | open, `docs-only` | Accepted reference-metrics addendum | Depends on T4 and docs; do not write yet |
@@ -190,15 +203,21 @@ Foundation closure and this handoff authorize no provider-backed operation. For 
 - Do **not** describe any model as qualified.
 - Do **not** expose, print, hash, or commit `OPENAI_API_KEY`.
 
-The intended candidate remains revision-pinned `gpt-5.6-sol` with `request_profile = "openai_reasoning_none"`, but a future run still requires fresh configuration/key/consent checks and explicit authorization.
+The rejected candidate was `gpt-5.6-sol` with `request_profile = "openai_reasoning_none"`. A future candidate requires a new approved design, fresh configuration/consent checks, and explicit operational authorization. This correction performs no provider operation or credential/config access.
 
-## Last Fresh Quality Evidence
+## Diagnostic Correction Quality Evidence
+
+The correction's offline gates passed with 101 focused tests (28 analyzer, 12 grounding, 61 harness; 2 live tests ignored), and 420 top-level workspace tests plus one nested subprocess pass (3 intentionally ignored). `cargo fmt --check`, warnings-denied locked workspace Clippy, locked workspace build, and diff checks passed. Evidence is retained under `/tmp/arc-diagnostic-fixes._ejne3z7/`. Local mock TCP and Unix-socket tests required sandbox escalation; no live provider operation or fixture execution occurred.
+
+The RED harness tests reproduced excerpt-derived end-line loss, lack of schema2 support, and genuine schema1 promotion reaching the credential/provider boundary. The corrected tests now pass. Classification tests exercise source-origin failures, original candidate indexes, simultaneous non-stop/grounding failures, clipped-span provider/cache parity, strict schema roundtrips, and pre-key rejection. Request-encoding failure remains mapped at its existing branch; the current host-only serializer has no injectable failure path without changing request code. Independent specification, code, and adversarial acceptance of this revision must precede task closure.
+
+## Historical Foundation Quality Evidence
 
 Accepted implementation evidence covers `b91cf321c2edc5fb1e0f6af5dca675c31763b1bc..3807dd4008f5dceb2faf85968e4478df5c9e7143`, with `runner.rs` SHA-256 `c3a148cbbc89736876a84c2a1a9bef0be412bc29040a3240eff170a8f28a2495`. Retained context is `/tmp/arc-build-context.6_ijyp0q/aurscan-0qag.01vn62.1.9.3/`: builder gate logs and per-gate revision/content identities are in `builder-logs/`; fresh orchestrator counts are in `orchestrator-verification.json`; code/spec acceptance is in `code-review-observation.json` and `spec-review-observation.json`; isolated evaluator evidence is in `evaluator-evidence/`.
 
 The RED step failed compilation because the new helper name was not yet defined. The helper rename and contract comment made the focused suite pass; no behavior failure was manufactured for existing behavior.
 
-Current gate state:
+Foundation gate state at `3807dd4`:
 
 ```text
 cargo test --locked -p aurscan-llm --test live_eval     PASS: 55 passed, 2 ignored
@@ -253,6 +272,6 @@ Do not drop these stashes without explicit owner authorization.
 2. Run `arc prime` with the new session identity.
 3. Confirm actual branch/upstream state and preserve unrelated work and existing stashes.
 4. Read closed `.1.9.3`'s completion evidence and permanent parent design, including approved `plan.056dgb`; preserve the accepted coordination boundary.
-5. Inspect ready-by-dependencies promotion-preflight task `.1.9.4` and its stored run contract. The foundation is complete; this implementation request did not authorize a live run.
-6. Before any operational run, verify the task's configuration, diagnostic destination, consent, and explicit authorization requirements. Preserve manual stale-probe recovery and the prohibition on automatic paid-run retries.
+5. Read `.1.9.6` acceptance/publication evidence and rejected `.1.9.4` results. The retained schema1 artifact cannot be promoted under schema2 or used to reconstruct the lost incomplete cause.
+6. Keep paid operations blocked pending a new approved design and explicit authorization. Then verify configuration, diagnostic destination, and consent requirements. Preserve manual stale-probe recovery and the prohibition on automatic paid-run retries.
 7. Keep parent epic `.1.9` open. Qualification `.1.5` remains blocked on a passing preflight and fresh owner authorization; accepted metrics remain blocked on successful qualification.

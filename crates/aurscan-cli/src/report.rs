@@ -754,6 +754,7 @@ mod tests {
                 requested_packages: vec!["split".into()],
                 combined: report("base", Verdict::Clean, vec![]),
                 analysis: AnalysisOutcome {
+                    diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
                     status,
                     source,
                     findings: vec![],
@@ -832,6 +833,7 @@ mod tests {
                 requested_packages: vec!["split".into()],
                 combined: report("base", Verdict::Clean, vec![]),
                 analysis: AnalysisOutcome {
+                    diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
                     status: AnalysisStatus::Unavailable,
                     source: None,
                     findings: vec![],
@@ -875,6 +877,7 @@ mod tests {
             requested_packages: vec!["valid-bundle".into()],
             combined: report("valid-bundle", Verdict::Clean, vec![]),
             analysis: AnalysisOutcome {
+                diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
                 status: AnalysisStatus::Unavailable,
                 source: None,
                 findings: vec![],
@@ -895,6 +898,7 @@ mod tests {
             requested_packages: vec!["bundle-failure".into()],
             combined: report("bundle-failure", Verdict::Clean, vec![]),
             analysis: AnalysisOutcome {
+                diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
                 status: AnalysisStatus::Incomplete,
                 source: None,
                 findings: vec![],
@@ -954,6 +958,7 @@ mod tests {
                 requested_packages: vec!["split".into()],
                 combined: report("base", Verdict::Clean, vec![]),
                 analysis: AnalysisOutcome {
+                    diagnostics: aurscan_llm::AnalysisDiagnostics::default(),
                     status: AnalysisStatus::Completed,
                     source: Some(AnalysisSource::Cache),
                     findings: vec![],
