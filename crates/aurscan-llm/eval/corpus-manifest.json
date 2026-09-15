@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "benign_snapshot_path": "crates/aurscan-cli/tests/fixtures/benign-snapshot",
   "calibration_benign_ids": [
     "accounts-qml-module",
@@ -73,7 +73,7 @@
       "id": "schema-forgery",
       "category": "injection",
       "path": "crates/aurscan-llm/tests/fixtures/injection/schema-forgery",
-      "expected_kinds": ["obfuscated_execution", "other_semantic"],
+      "expected_kinds": ["obfuscated_execution", "build_install_boundary"],
       "allowed_evidence": [
         {"file": "PKGBUILD", "start_line_min": 7, "end_line_max": 8}
       ],

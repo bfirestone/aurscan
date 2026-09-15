@@ -857,8 +857,8 @@ fn verify_promotion_bytes(
     data: &CorpusData,
 ) -> Result<DiagnosticReport> {
     ensure!(
-        data.manifest.schema_version == 2,
-        "promotion requires corpus manifest schema 2"
+        data.manifest.schema_version == 3,
+        "promotion requires corpus manifest schema 3"
     );
     ensure!(
         identity.corpus_manifest_hash == hex(blake3::hash(&data.manifest_bytes).as_bytes())
@@ -898,15 +898,8 @@ fn verify_promotion_bytes(
         report.outcome == RunOutcome::Passed && report.failed_threshold_ids.is_empty(),
         "promotion diagnostic did not pass"
     );
-    validate_promotion_metrics(&report, data, &bundles)?;
-    ensure!(
-        threshold_failures(RunKind::Calibration, &report.metrics).is_empty(),
-        "promotion diagnostic metrics do not pass calibration thresholds"
-    );
-    ensure!(
-        report.selected_case_ids == expected_selected_ids,
-        "promotion diagnostic selection changed"
-    );
+    // Bind the artifact to this contract before interpreting its case metrics
+    // using the current oracle's semantic labels.
     ensure!(
         report.model_id == identity.model_id
             && report.endpoint_origin_fingerprint == identity.endpoint_origin_fingerprint,
@@ -932,6 +925,15 @@ fn verify_promotion_bytes(
             && report.oracle_hash == identity.oracle_hash
             && report.corpus_content_hash == identity.corpus_content_hash,
         "promotion diagnostic identity fields changed"
+    );
+    validate_promotion_metrics(&report, data, &bundles)?;
+    ensure!(
+        threshold_failures(RunKind::Calibration, &report.metrics).is_empty(),
+        "promotion diagnostic metrics do not pass calibration thresholds"
+    );
+    ensure!(
+        report.selected_case_ids == expected_selected_ids,
+        "promotion diagnostic selection changed"
     );
     Ok(report)
 }
@@ -2499,6 +2501,99 @@ max_requests_per_run = 100
     }
 
     #[test]
+    fn prior_manifest_contract_stops_at_promotion_before_key_or_provider_access() {
+        let mut data = corpus::load_and_validate(&corpus::workspace_root().unwrap()).unwrap();
+        let identity = promotion_identity(&data);
+        let report = promotion_report(&identity, &data);
+        let bytes = serde_json::to_vec(&report).unwrap();
+        let digest = diagnostic::sha256_hex(&bytes);
+        data.manifest.schema_version = 2;
+        assert_eq!(
+            verify_promotion_bytes(&bytes, &digest, &identity, &data)
+                .unwrap_err()
+                .to_string(),
+            "promotion requires corpus manifest schema 3"
+        );
+        assert_qualification_stops_before_boundaries(&bytes, &digest, &identity, &data);
+    }
+
+    #[test]
+    fn self_consistent_prior_oracle_artifact_rejects_current_identity_before_boundaries() {
+        let mut data = corpus::load_and_validate(&corpus::workspace_root().unwrap()).unwrap();
+        let identity = promotion_identity(&data);
+        // Synthetic passing calibration, using the actual revision-2 byte hashes from
+        // 962de974fd6d1818abddd3af8543c36267c21127. No historical result is rescored.
+        let mut prior = promotion_report(&identity, &data);
+        prior.corpus_manifest_hash =
+            "8e5ab87b8a3fdd87c4cb01de63bffd3ed8c234ae4462f9c825f71d3a2a3d98ea".to_owned();
+        prior.oracle_hash =
+            "8058161e7344d77742fdeab3e9a3131e0bcfd1e08bb6abe46379606efb5a0c65".to_owned();
+        prior.analysis_contract_hash =
+            diagnostic::analysis_contract_hash(&diagnostic::contract_identity(&prior));
+        let prior_kinds = ["obfuscated_execution", "other_semantic"]
+            .map(str::to_owned)
+            .to_vec();
+        prior
+            .case_results
+            .iter_mut()
+            .find(|case| case.id == "schema-forgery")
+            .unwrap()
+            .expected_kinds = prior_kinds.clone();
+        diagnostic::validate_report(&prior).unwrap();
+        assert!(threshold_failures(RunKind::Calibration, &prior.metrics).is_empty());
+        // The artifact's case metrics are coherent with its own oracle, too.
+        let case_index = data
+            .manifest
+            .cases
+            .iter()
+            .position(|case| case.id == "schema-forgery")
+            .unwrap();
+        let current_kinds = std::mem::replace(
+            &mut data.manifest.cases[case_index].expected_kinds,
+            prior_kinds,
+        );
+        let bundles = corpus::calibration_bundles(&data).unwrap();
+        validate_promotion_metrics(&prior, &data, &bundles).unwrap();
+        data.manifest.cases[case_index].expected_kinds = current_kinds;
+
+        let bytes = serde_json::to_vec(&prior).unwrap();
+        let digest = diagnostic::sha256_hex(&bytes);
+        let reference_area = tempfile::tempdir().unwrap();
+        let reference_publication = ReferencePublication::for_output(
+            reference_area.path(),
+            &reference_area.path().join("v1.json"),
+        )
+        .unwrap();
+        let key_reads = Cell::new(0);
+        let sends = Cell::new(0);
+        let error = orchestrate_provider_boundaries(
+            RunKind::Qualification,
+            Some(&reference_publication),
+            Some(&identity),
+            &data,
+            Some(PromotionSource::Bytes {
+                bytes: &bytes,
+                digest: &digest,
+            }),
+            || {
+                key_reads.set(key_reads.get() + 1);
+                Ok(())
+            },
+            || {
+                sends.set(sends.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "promotion diagnostic analysis contract changed"
+        );
+        assert_eq!(key_reads.get(), 0);
+        assert_eq!(sends.get(), 0);
+    }
+
+    #[test]
     fn valid_promotion_crosses_key_and_provider_boundaries_once() {
         let workspace = corpus::workspace_root().unwrap();
         let data = corpus::load_and_validate(&workspace).unwrap();
@@ -3190,5 +3285,11 @@ max_requests_per_run = 100
             verify_promotion_bytes(&bytes, &diagnostic::sha256_hex(&bytes), &identity, &data)
                 .unwrap_err();
         assert!(error.to_string().contains("expected-hit claim"));
+        assert_qualification_stops_before_boundaries(
+            &bytes,
+            &diagnostic::sha256_hex(&bytes),
+            &identity,
+            &data,
+        );
     }
 }

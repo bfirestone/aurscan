@@ -77,7 +77,7 @@ const EXPECTED_KIND_SETS: [(&str, &[&str]); 7] = [
     ),
     (
         "schema-forgery",
-        &["obfuscated_execution", "other_semantic"],
+        &["obfuscated_execution", "build_install_boundary"],
     ),
     (
         "external-citation",
@@ -311,7 +311,7 @@ pub(crate) fn validate_model_facing_bundles<'a>(
 
 fn validate_manifest(workspace: &Path, manifest: &CorpusManifest) -> Result<()> {
     ensure!(
-        manifest.schema_version == 2,
+        manifest.schema_version == 3,
         "unsupported corpus manifest schema"
     );
     ensure!(
@@ -1417,6 +1417,87 @@ mod tests {
     #[test]
     fn manifest_oracle_and_static_fixture_contracts_hold() {
         offline_contract().unwrap();
+    }
+
+    #[test]
+    fn manifest_revision_three_accepts_only_the_adjudicated_kind_set() {
+        let workspace = workspace_root().unwrap();
+        let bytes = fs::read(workspace.join(CORPUS_MANIFEST_PATH)).unwrap();
+        let mut manifest: CorpusManifest = serde_json::from_slice(&bytes).unwrap();
+        manifest.schema_version = 3;
+        let index = manifest
+            .cases
+            .iter()
+            .position(|case| case.id == "schema-forgery")
+            .unwrap();
+        manifest.cases[index].expected_kinds = ["obfuscated_execution", "build_install_boundary"]
+            .map(str::to_owned)
+            .to_vec();
+        validate_manifest(&workspace, &manifest).unwrap();
+
+        for kinds in [
+            vec!["obfuscated_execution", "other_semantic"],
+            vec!["obfuscated_execution"],
+            vec!["build_install_boundary"],
+            vec![
+                "obfuscated_execution",
+                "build_install_boundary",
+                "other_semantic",
+            ],
+            vec!["build_install_boundary", "obfuscated_execution"],
+        ] {
+            manifest.cases[index].expected_kinds = kinds.into_iter().map(str::to_owned).collect();
+            let error = validate_manifest(&workspace, &manifest).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "corpus case schema-forgery expected kinds or order changed"
+            );
+        }
+    }
+
+    #[test]
+    fn prior_manifest_versions_are_rejected_even_with_current_labels() {
+        let workspace = workspace_root().unwrap();
+        let bytes = fs::read(workspace.join(CORPUS_MANIFEST_PATH)).unwrap();
+        let mut manifest: CorpusManifest = serde_json::from_slice(&bytes).unwrap();
+        for version in [1, 2] {
+            manifest.schema_version = version;
+            assert_eq!(
+                validate_manifest(&workspace, &manifest)
+                    .unwrap_err()
+                    .to_string(),
+                "unsupported corpus manifest schema"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_revision_three_changes_only_version_and_schema_forgery_kinds() {
+        let bytes = fs::read(workspace_root().unwrap().join(CORPUS_MANIFEST_PATH)).unwrap();
+        let manifest: CorpusManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(manifest.schema_version, 3);
+        let case = manifest
+            .cases
+            .iter()
+            .find(|case| case.id == "schema-forgery")
+            .unwrap();
+        assert_eq!(
+            case.expected_kinds,
+            ["obfuscated_execution", "build_install_boundary"]
+        );
+        // Undo exactly the two authorized edits and compare all remaining bytes with revision 2.
+        let prior = String::from_utf8(bytes)
+            .unwrap()
+            .replacen("\"schema_version\": 3", "\"schema_version\": 2", 1)
+            .replacen(
+                "[\"obfuscated_execution\", \"build_install_boundary\"]",
+                "[\"obfuscated_execution\", \"other_semantic\"]",
+                1,
+            );
+        assert_eq!(
+            sha256_hex(prior.as_bytes()),
+            "4e0dd173e6892ba6a40e1ebf08bad0e7b96df0f6bda3aae568942bf602c658c1"
+        );
     }
 
     #[test]
