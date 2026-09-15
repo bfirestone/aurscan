@@ -1,8 +1,9 @@
-use anyhow::{anyhow, ensure, Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use aurscan_llm::{
     DefaultRecipeBundleBuilder, LlmConfig, LlmFindingKind, RecipeBundle, RecipeBundleBuilder,
 };
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -156,6 +157,7 @@ pub(crate) struct CorpusData {
     pub(crate) benign: BenignManifest,
     pub(crate) manifest_bytes: Vec<u8>,
     pub(crate) oracle_bytes: Vec<u8>,
+    frozen_bundles: BTreeMap<String, RecipeBundle>,
 }
 
 pub(crate) fn workspace_root() -> Result<PathBuf> {
@@ -166,6 +168,9 @@ pub(crate) fn workspace_root() -> Result<PathBuf> {
 }
 
 pub(crate) fn load_and_validate(workspace: &Path) -> Result<CorpusData> {
+    let workspace = workspace
+        .canonicalize()
+        .context("cannot canonicalize corpus workspace")?;
     let manifest_bytes = fs::read(workspace.join(CORPUS_MANIFEST_PATH))
         .context("cannot read the LLM corpus manifest")?;
     let manifest: CorpusManifest =
@@ -177,18 +182,20 @@ pub(crate) fn load_and_validate(workspace: &Path) -> Result<CorpusData> {
     let oracle_bytes =
         fs::read(workspace.join(ORACLE_PATH)).context("cannot read the LLM semantic oracle")?;
 
-    validate_manifest(workspace, &manifest)?;
-    validate_benign_manifest(workspace, &manifest, &benign)?;
-    validate_static_fixture_contract(workspace, &manifest)?;
+    validate_manifest(&workspace, &manifest)?;
+    validate_benign_manifest(&workspace, &manifest, &benign)?;
+    validate_static_fixture_contract(&workspace, &manifest)?;
     validate_oracle(&manifest, &oracle_bytes)?;
-    validate_git_modes(workspace, &manifest)?;
-    validate_rust_never_executes_fixtures(workspace)?;
+    validate_git_modes(&workspace, &manifest)?;
+    validate_rust_never_executes_fixtures(&workspace)?;
+    let frozen_bundles = collect_frozen_bundles(&workspace, &manifest, &benign)?;
 
     Ok(CorpusData {
         manifest,
         benign,
         manifest_bytes,
         oracle_bytes,
+        frozen_bundles,
     })
 }
 
@@ -261,6 +268,45 @@ pub(crate) fn selected_benign(data: &CorpusData, calibration: bool) -> Result<Ve
                 .ok_or_else(|| anyhow!("calibration benign sentinel {id} is missing"))
         })
         .collect()
+}
+
+pub(crate) fn calibration_bundles(data: &CorpusData) -> Result<Vec<(String, RecipeBundle)>> {
+    expected_calibration_ids()
+        .into_iter()
+        .map(|id| {
+            let bundle = data
+                .frozen_bundles
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| anyhow!("frozen calibration bundle {id} is missing"))?;
+            Ok((id, bundle))
+        })
+        .collect()
+}
+
+pub(crate) fn validate_model_facing_bundles<'a>(
+    data: &CorpusData,
+    bundles: impl IntoIterator<Item = (&'a str, &'a RecipeBundle)>,
+) -> Result<()> {
+    let bundles = bundles.into_iter().collect::<Vec<_>>();
+    let actual_ids = bundles.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+    let calibration_ids = expected_calibration_ids();
+    let qualification_ids = qualification_selected_ids(data);
+    ensure!(
+        actual_ids == calibration_ids || actual_ids == qualification_ids,
+        "model-facing corpus selection or order changed"
+    );
+    for (id, bundle) in bundles {
+        let frozen = data
+            .frozen_bundles
+            .get(id)
+            .ok_or_else(|| anyhow!("model-facing bundle {id} is absent from frozen corpus"))?;
+        ensure!(
+            bundle == frozen,
+            "model-facing bundle {id} differs from frozen host bytes"
+        );
+    }
+    Ok(())
 }
 
 fn validate_manifest(workspace: &Path, manifest: &CorpusManifest) -> Result<()> {
@@ -423,12 +469,14 @@ fn validate_benign_manifest(
         "benign snapshot package count does not match manifest"
     );
 
-    let snapshot_root = workspace.join(&corpus.benign_snapshot_path);
+    let snapshot_root = canonical_benign_snapshot_root(workspace, corpus)?;
     let mut packages = BTreeSet::new();
     for package in &manifest.packages {
+        validate_pkgbase(&package.pkgbase)
+            .with_context(|| format!("benign snapshot pkgbase {:?} is unsafe", package.pkgbase))?;
         ensure!(
-            !package.pkgbase.trim().is_empty() && packages.insert(package.pkgbase.as_str()),
-            "benign snapshot has a missing or duplicate pkgbase"
+            packages.insert(package.pkgbase.as_str()),
+            "benign snapshot has a duplicate pkgbase"
         );
         ensure!(
             package.popularity.is_finite() && package.popularity >= 0.0,
@@ -438,18 +486,14 @@ fn validate_benign_manifest(
         let _ = package.num_votes;
         ensure!(
             package.sha256.len() == 64
-                && package.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                && package
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
             "benign snapshot package {} has invalid sha256",
             package.pkgbase
         );
-        ensure!(
-            snapshot_root
-                .join(&package.pkgbase)
-                .join("PKGBUILD")
-                .is_file(),
-            "benign snapshot package {} PKGBUILD is missing",
-            package.pkgbase
-        );
+        validate_benign_package(&snapshot_root, package)?;
     }
     ensure!(
         corpus
@@ -459,6 +503,132 @@ fn validate_benign_manifest(
         "calibration benign sentinel is absent from the benign snapshot"
     );
     Ok(())
+}
+
+fn canonical_benign_snapshot_root(workspace: &Path, corpus: &CorpusManifest) -> Result<PathBuf> {
+    validate_relative_path(&corpus.benign_snapshot_path)
+        .context("benign snapshot path is unsafe")?;
+    let canonical_workspace = workspace
+        .canonicalize()
+        .context("cannot canonicalize workspace for benign snapshot")?;
+    let mut lexical = canonical_workspace.clone();
+    for component in Path::new(&corpus.benign_snapshot_path).components() {
+        let Component::Normal(part) = component else {
+            bail!("benign snapshot path is not normalized");
+        };
+        lexical.push(part);
+        let metadata = fs::symlink_metadata(&lexical).with_context(|| {
+            format!(
+                "cannot inspect benign snapshot component {}",
+                lexical.display()
+            )
+        })?;
+        ensure!(
+            !metadata.file_type().is_symlink(),
+            "benign snapshot component {} is a symlink",
+            lexical.display()
+        );
+    }
+    let canonical = lexical
+        .canonicalize()
+        .context("cannot canonicalize benign snapshot root")?;
+    ensure!(
+        canonical.starts_with(&canonical_workspace) && canonical != canonical_workspace,
+        "benign snapshot root escapes the canonical workspace"
+    );
+    ensure!(
+        canonical.is_dir(),
+        "benign snapshot root is not a directory"
+    );
+    Ok(canonical)
+}
+
+fn canonical_benign_package_root(snapshot_root: &Path, pkgbase: &str) -> Result<PathBuf> {
+    validate_pkgbase(pkgbase)?;
+    let lexical = snapshot_root.join(pkgbase);
+    let metadata = fs::symlink_metadata(&lexical)
+        .with_context(|| format!("cannot inspect benign package root {pkgbase}"))?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "benign package root {pkgbase} is not a real directory"
+    );
+    let canonical = lexical
+        .canonicalize()
+        .with_context(|| format!("cannot canonicalize benign package root {pkgbase}"))?;
+    ensure!(
+        canonical.starts_with(snapshot_root) && canonical != snapshot_root,
+        "benign package root {pkgbase} escapes the canonical snapshot root"
+    );
+    Ok(canonical)
+}
+
+fn validate_benign_package(snapshot_root: &Path, package: &BenignPackage) -> Result<RecipeBundle> {
+    let package_root = canonical_benign_package_root(snapshot_root, &package.pkgbase)?;
+    let pkgbuild_path = package_root.join("PKGBUILD");
+    let metadata = fs::symlink_metadata(&pkgbuild_path)
+        .with_context(|| format!("benign package {} PKGBUILD is missing", package.pkgbase))?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "benign package {} PKGBUILD is not a real file",
+        package.pkgbase
+    );
+    let actual_bytes = fs::read(&pkgbuild_path)
+        .with_context(|| format!("cannot read benign package {} PKGBUILD", package.pkgbase))?;
+    ensure!(
+        sha256_hex(&actual_bytes) == package.sha256,
+        "benign package {} SHA-256 does not match submitted bytes",
+        package.pkgbase
+    );
+    let bundle = DefaultRecipeBundleBuilder
+        .build(
+            &package_root,
+            &package.pkgbase,
+            LlmConfig::default().bundle_limits(),
+        )
+        .with_context(|| format!("cannot validate benign package {} bundle", package.pkgbase))?;
+    ensure!(
+        bundle.files.len() == 1
+            && bundle.files[0].path == "PKGBUILD"
+            && bundle.files[0].content.as_bytes() == actual_bytes,
+        "benign package {} submitted file set or bytes changed",
+        package.pkgbase
+    );
+    Ok(bundle)
+}
+
+fn collect_frozen_bundles(
+    workspace: &Path,
+    corpus: &CorpusManifest,
+    benign: &BenignManifest,
+) -> Result<BTreeMap<String, RecipeBundle>> {
+    let mut bundles = BTreeMap::new();
+    for case in &corpus.cases {
+        let bundle = DefaultRecipeBundleBuilder
+            .build(
+                &workspace.join(&case.path),
+                &case.id,
+                LlmConfig::default().bundle_limits(),
+            )
+            .with_context(|| format!("cannot freeze corpus bundle {}", case.id))?;
+        validate_suspicious_file_set(&case.id, &bundle)?;
+        ensure!(
+            bundles.insert(case.id.clone(), bundle).is_none(),
+            "frozen corpus case IDs repeat"
+        );
+    }
+    let snapshot_root = canonical_benign_snapshot_root(workspace, corpus)?;
+    for package in &benign.packages {
+        let bundle = validate_benign_package(&snapshot_root, package)?;
+        ensure!(
+            bundles.insert(package.pkgbase.clone(), bundle).is_none(),
+            "frozen benign package IDs repeat"
+        );
+    }
+    ensure!(
+        bundles.len() == corpus.cases.len() + benign.packages.len(),
+        "frozen corpus bundle count changed"
+    );
+    Ok(bundles)
 }
 
 fn validate_static_fixture_contract(workspace: &Path, manifest: &CorpusManifest) -> Result<()> {
@@ -501,6 +671,7 @@ fn validate_static_fixture_contract(workspace: &Path, manifest: &CorpusManifest)
         let bundle = DefaultRecipeBundleBuilder
             .build(&case_root, &case.id, LlmConfig::default().bundle_limits())
             .with_context(|| format!("cannot validate submitted corpus bundle {}", case.id))?;
+        validate_suspicious_file_set(&case.id, &bundle)?;
         for evidence in &case.allowed_evidence {
             let file = bundle
                 .files
@@ -540,6 +711,26 @@ fn validate_static_fixture_contract(workspace: &Path, manifest: &CorpusManifest)
     validate_exact_decoded_bytes(&bundles)?;
     validate_guard_order(&bundles)?;
     validate_download_pair_behavior(&bundles)
+}
+
+fn validate_suspicious_file_set(case_id: &str, bundle: &RecipeBundle) -> Result<()> {
+    let expected: &[&str] = if case_id == "cross-file-persistence" {
+        &["PKGBUILD", "persist.install"]
+    } else {
+        &["PKGBUILD"]
+    };
+    ensure!(
+        bundle
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .eq(expected.iter().copied())
+            && bundle.coverage.included_files == expected.len()
+            && bundle.coverage.excluded_binary_files.is_empty()
+            && bundle.coverage.excluded_symlinks.is_empty(),
+        "corpus case {case_id} eligible submitted file set changed"
+    );
+    Ok(())
 }
 
 fn validate_frozen_fixture_bytes(bundles: &BTreeMap<&str, RecipeBundle>) -> Result<()> {
@@ -778,7 +969,9 @@ fn validate_variable_names(case_id: &str, file: &str, content: &str) -> Result<(
             !["test", "fixture", "malicious", "evaluation"]
                 .iter()
                 .any(|forbidden| lowercase.contains(forbidden))
-                && !finding_labels.contains(lowercase.as_str()),
+                && !finding_labels
+                    .iter()
+                    .any(|finding_label| lowercase.contains(finding_label)),
             "corpus case {case_id} file {file} uses forbidden benchmark-label variable {name}"
         );
     }
@@ -991,11 +1184,76 @@ fn validate_rust_never_executes_fixtures(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_pkgbase(pkgbase: &str) -> Result<()> {
+    validate_relative_path(pkgbase)?;
+    ensure!(
+        !pkgbase.contains('/'),
+        "pkgbase must be exactly one normalized path component"
+    );
+    Ok(())
+}
+
+pub(crate) fn corpus_content_hash<'a>(
+    bundles: impl IntoIterator<Item = (&'a str, &'a RecipeBundle)>,
+) -> Result<String> {
+    let bundles = bundles.into_iter().collect::<Vec<_>>();
+    let mut hasher = Sha256::new();
+    append_framed(&mut hasher, &(bundles.len() as u64).to_le_bytes());
+    for (id, bundle) in bundles {
+        validate_pkgbase(id).context("corpus bundle ID is unsafe")?;
+        ensure!(
+            bundle.pkgbase == id,
+            "corpus bundle ID does not match pkgbase"
+        );
+        append_framed(&mut hasher, id.as_bytes());
+        append_framed(&mut hasher, &(bundle.files.len() as u64).to_le_bytes());
+        let mut previous_path: Option<&str> = None;
+        for file in &bundle.files {
+            validate_relative_path(&file.path).context("corpus bundle path is unsafe")?;
+            if let Some(previous) = previous_path {
+                ensure!(
+                    previous.as_bytes() < file.path.as_bytes(),
+                    "corpus bundle paths are not uniquely byte-sorted"
+                );
+            }
+            append_framed(&mut hasher, file.path.as_bytes());
+            append_framed(&mut hasher, file.content.as_bytes());
+            previous_path = Some(&file.path);
+        }
+    }
+    Ok(hex(&hasher.finalize()))
+}
+
+fn append_framed(hasher: &mut Sha256, value: &[u8]) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(&mut encoded, "{byte:02x}").expect("writing into String cannot fail");
+    }
+    encoded
+}
+
 pub(crate) fn validate_relative_path(path: &str) -> Result<()> {
     ensure!(!path.is_empty(), "relative path is empty");
     ensure!(
         !path.chars().any(is_terminal_control),
         "path contains a terminal control character"
+    );
+    ensure!(
+        !path.contains('\\')
+            && path
+                .split('/')
+                .all(|component| !component.is_empty() && component != "." && component != ".."),
+        "path is not in canonical lexical form"
     );
     let path = Path::new(path);
     ensure!(!path.is_absolute(), "path must be relative");
@@ -1154,12 +1412,17 @@ mod tests {
     #[test]
     fn relative_paths_reject_absolute_parent_current_and_control_components() {
         assert!(validate_relative_path("PKGBUILD").is_ok());
+        assert!(validate_relative_path("nested/file.patch").is_ok());
         for unsafe_path in [
             "",
             "/tmp/file",
             "../file",
             "dir/../file",
             "./file",
+            "nested/./file",
+            "a//b",
+            "nested\\file",
+            "trailing/",
             "bad\nfile",
         ] {
             assert!(
@@ -1167,6 +1430,137 @@ mod tests {
                 "accepted {unsafe_path:?}"
             );
         }
+    }
+
+    #[test]
+    fn variable_names_reject_finding_kind_labels_as_substrings() {
+        for variable in [
+            "my_download_execute_marker",
+            "prefix_credential_access",
+            "other_semantic_suffix",
+        ] {
+            let content = format!("local {variable}=value\n");
+            assert!(validate_variable_names("case", "PKGBUILD", &content).is_err());
+        }
+    }
+
+    #[test]
+    fn benign_pkgbases_are_exactly_one_normalized_component() {
+        assert!(validate_pkgbase("accounts-qml-module").is_ok());
+        for unsafe_pkgbase in [
+            "",
+            ".",
+            "..",
+            "/absolute",
+            "nested/package",
+            "nested\\package",
+            "bad\npackage",
+        ] {
+            assert!(
+                validate_pkgbase(unsafe_pkgbase).is_err(),
+                "accepted {unsafe_pkgbase:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn benign_package_roots_reject_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let snapshot = temporary.path().join("snapshot");
+        let outside = temporary.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("PKGBUILD"), b"pkgname=outside\n").unwrap();
+        fs::create_dir(&snapshot).unwrap();
+        symlink(&outside, snapshot.join("escaped")).unwrap();
+
+        let snapshot = snapshot.canonicalize().unwrap();
+        assert!(canonical_benign_package_root(&snapshot, "escaped").is_err());
+    }
+
+    #[test]
+    fn benign_manifest_hashes_bind_actual_submitted_bytes() {
+        let workspace = workspace_root().unwrap();
+        let data = load_and_validate(&workspace).unwrap();
+        let snapshot = canonical_benign_snapshot_root(&workspace, &data.manifest).unwrap();
+        let package = data
+            .benign
+            .packages
+            .iter()
+            .find(|package| package.pkgbase == "accounts-qml-module")
+            .unwrap();
+        validate_benign_package(&snapshot, package).unwrap();
+
+        let changed = BenignPackage {
+            pkgbase: package.pkgbase.clone(),
+            popularity: package.popularity,
+            num_votes: package.num_votes,
+            sha256: "00".repeat(32),
+        };
+        assert!(validate_benign_package(&snapshot, &changed).is_err());
+    }
+
+    #[test]
+    fn corpus_content_hash_binds_bundle_order_paths_and_model_facing_bytes() {
+        let workspace = workspace_root().unwrap();
+        let root = workspace
+            .join("crates/aurscan-llm/tests/fixtures/semantic-malicious/obfuscated-download");
+        let bundle = DefaultRecipeBundleBuilder
+            .build(
+                &root,
+                "obfuscated-download",
+                LlmConfig::default().bundle_limits(),
+            )
+            .unwrap();
+        let expected = corpus_content_hash([("obfuscated-download", &bundle)]).unwrap();
+
+        let mut changed_bytes = bundle.clone();
+        changed_bytes.files[0].content.push('#');
+        assert_ne!(
+            corpus_content_hash([("obfuscated-download", &changed_bytes)]).unwrap(),
+            expected
+        );
+
+        let mut changed_path = bundle.clone();
+        changed_path.files[0].path = "nested/PKGBUILD".to_owned();
+        assert_ne!(
+            corpus_content_hash([("obfuscated-download", &changed_path)]).unwrap(),
+            expected
+        );
+
+        let mut changed_id = bundle.clone();
+        changed_id.pkgbase = "different-id".to_owned();
+        assert_ne!(
+            corpus_content_hash([("different-id", &changed_id)]).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn model_facing_selection_must_match_frozen_host_bundles() {
+        let workspace = workspace_root().unwrap();
+        let data = load_and_validate(&workspace).unwrap();
+        let mut bundles = calibration_bundles(&data).unwrap();
+        validate_model_facing_bundles(
+            &data,
+            bundles.iter().map(|(id, bundle)| (id.as_str(), bundle)),
+        )
+        .unwrap();
+        bundles[0].1.files[0].content.push('#');
+        assert!(validate_model_facing_bundles(
+            &data,
+            bundles.iter().map(|(id, bundle)| (id.as_str(), bundle)),
+        )
+        .is_err());
+
+        let mut unexpected_file = data.frozen_bundles["obfuscated-download"].clone();
+        let mut extra = unexpected_file.files[0].clone();
+        extra.path = "unexpected.patch".to_owned();
+        unexpected_file.files.push(extra);
+        unexpected_file.coverage.included_files += 1;
+        assert!(validate_suspicious_file_set("obfuscated-download", &unexpected_file).is_err());
     }
 
     #[test]

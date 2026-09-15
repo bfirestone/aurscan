@@ -5,10 +5,15 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::env;
-use std::ffi::OsStr;
-use std::fs::{self, File};
-use std::io::Write;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
+
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 
 const DIAGNOSTIC_OUTPUT_ENV: &str = "AURSCAN_LLM_EVAL_DIAGNOSTIC_OUTPUT";
 const FORBIDDEN_KEYS: [&str; 11] = [
@@ -121,6 +126,7 @@ pub(crate) struct DiagnosticReport {
     pub(crate) analysis_epoch: u32,
     pub(crate) corpus_manifest_hash: String,
     pub(crate) oracle_hash: String,
+    pub(crate) corpus_content_hash: String,
     pub(crate) analysis_contract_hash: String,
     pub(crate) selected_case_ids: Vec<String>,
     pub(crate) metrics: EvaluationMetrics,
@@ -140,14 +146,42 @@ pub(crate) struct AnalysisContractIdentity {
     pub(crate) review_strategy_id: String,
     pub(crate) corpus_manifest_hash: String,
     pub(crate) oracle_hash: String,
+    pub(crate) corpus_content_hash: String,
 }
 
 #[derive(Debug)]
 pub(crate) struct PreparedDiagnosticPath {
     path: PathBuf,
+    parent_path: PathBuf,
+    parent: File,
+    file_name: OsString,
 }
 
 impl PreparedDiagnosticPath {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct OpenedDiagnosticPath {
+    path: PathBuf,
+    _parent: File,
+    file: File,
+}
+
+impl OpenedDiagnosticPath {
+    pub(crate) fn read_bytes(&mut self) -> Result<Vec<u8>> {
+        self.file
+            .seek(std::io::SeekFrom::Start(0))
+            .context("cannot seek promotion diagnostic")?;
+        let mut bytes = Vec::new();
+        self.file
+            .read_to_end(&mut bytes)
+            .context("cannot read promotion diagnostic")?;
+        Ok(bytes)
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -185,6 +219,7 @@ pub(crate) fn analysis_contract_hash(identity: &AnalysisContractIdentity) -> Str
     append_framed(&mut hasher, identity.review_strategy_id.as_bytes());
     append_framed(&mut hasher, identity.corpus_manifest_hash.as_bytes());
     append_framed(&mut hasher, identity.oracle_hash.as_bytes());
+    append_framed(&mut hasher, identity.corpus_content_hash.as_bytes());
     hex(&hasher.finalize())
 }
 
@@ -206,6 +241,7 @@ pub(crate) fn contract_identity(report: &DiagnosticReport) -> AnalysisContractId
         review_strategy_id: report.review_strategy_id.clone(),
         corpus_manifest_hash: report.corpus_manifest_hash.clone(),
         oracle_hash: report.oracle_hash.clone(),
+        corpus_content_hash: report.corpus_content_hash.clone(),
     }
 }
 
@@ -217,18 +253,24 @@ pub(crate) fn configured_output_path() -> Result<PreparedDiagnosticPath> {
     prepare_new_diagnostic_path(&state_home, Path::new(&configured))
 }
 
-pub(crate) fn configured_existing_path(variable: &str) -> Result<PathBuf> {
+pub(crate) fn configured_existing_path(variable: &str) -> Result<OpenedDiagnosticPath> {
     let state_home = state_home()?;
     let configured = env::var_os(variable)
         .ok_or_else(|| anyhow!("{variable} must name an existing private diagnostic JSON path"))?;
-    validate_existing_diagnostic_path(&state_home, Path::new(&configured))
+    open_existing_diagnostic_path(&state_home, Path::new(&configured))
 }
 
 fn state_home() -> Result<PathBuf> {
-    let state_home = env::var_os("XDG_STATE_HOME")
+    let xdg = env::var_os("XDG_STATE_HOME");
+    let home = env::var_os("HOME");
+    state_home_from(xdg.as_deref(), home.as_deref())
+}
+
+fn state_home_from(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf> {
+    let state_home = xdg
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .or_else(|| home.map(|value| PathBuf::from(value).join(".local/state")))
         .ok_or_else(|| anyhow!("XDG_STATE_HOME or HOME is required for evaluation diagnostics"))?;
     validate_absolute_without_traversal(&state_home, "state home")?;
     Ok(state_home)
@@ -243,35 +285,60 @@ pub(crate) fn prepare_new_diagnostic_path(
     configured: &Path,
 ) -> Result<PreparedDiagnosticPath> {
     validate_diagnostic_location(state_home, configured)?;
+    ensure_private_state_home(state_home)?;
+    let parent_path = configured
+        .parent()
+        .ok_or_else(|| anyhow!("diagnostic path has no parent directory"))?;
+    create_private_directories(state_home, parent_path)?;
+    reject_symlinks(configured)?;
+    let parent = open_directory_nofollow(parent_path)
+        .context("cannot retain diagnostic parent directory")?;
+    let file_name = configured
+        .file_name()
+        .ok_or_else(|| anyhow!("diagnostic path has no file name"))?
+        .to_os_string();
+    let anchored_target = anchored_child_path(&parent, parent_path, &file_name);
     ensure!(
-        fs::symlink_metadata(configured)
+        fs::symlink_metadata(&anchored_target)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
         "diagnostic target already exists or cannot be inspected"
     );
-    ensure_private_state_home(state_home)?;
-    let parent = configured
-        .parent()
-        .ok_or_else(|| anyhow!("diagnostic path has no parent directory"))?;
-    create_private_directories(state_home, parent)?;
-    reject_symlinks(configured)?;
-    ensure!(!configured.exists(), "diagnostic target already exists");
     Ok(PreparedDiagnosticPath {
         path: configured.to_path_buf(),
+        parent_path: parent_path.to_path_buf(),
+        parent,
+        file_name,
     })
 }
 
-pub(crate) fn validate_existing_diagnostic_path(
+pub(crate) fn open_existing_diagnostic_path(
     state_home: &Path,
     configured: &Path,
-) -> Result<PathBuf> {
+) -> Result<OpenedDiagnosticPath> {
     validate_diagnostic_location(state_home, configured)?;
     reject_symlinks(configured)?;
-    let metadata = fs::metadata(configured).context("promotion diagnostic does not exist")?;
+    let parent_path = configured
+        .parent()
+        .ok_or_else(|| anyhow!("diagnostic path has no parent directory"))?;
+    let parent = open_directory_nofollow(parent_path)
+        .context("cannot retain promotion diagnostic parent directory")?;
+    let file_name = configured
+        .file_name()
+        .ok_or_else(|| anyhow!("promotion diagnostic path has no file name"))?;
+    let anchored = anchored_child_path(&parent, parent_path, file_name);
+    let file = open_regular_file_nofollow(&anchored)
+        .context("cannot securely open promotion diagnostic")?;
     ensure!(
-        metadata.is_file(),
+        file.metadata()
+            .context("cannot inspect promotion diagnostic")?
+            .is_file(),
         "promotion diagnostic is not a regular file"
     );
-    Ok(configured.to_path_buf())
+    Ok(OpenedDiagnosticPath {
+        path: configured.to_path_buf(),
+        _parent: parent,
+        file,
+    })
 }
 
 fn validate_diagnostic_location(state_home: &Path, configured: &Path) -> Result<()> {
@@ -409,6 +476,65 @@ fn set_directory_mode(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn open_directory_nofollow(path: &Path) -> Result<File> {
+    const O_DIRECTORY: i32 = 0o200000;
+    const O_NOFOLLOW: i32 = 0o400000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("cannot securely open directory {}", path.display()))?;
+    ensure!(
+        file.metadata()?.is_dir(),
+        "securely opened path is not a directory"
+    );
+    Ok(file)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_directory_nofollow(path: &Path) -> Result<File> {
+    let file =
+        File::open(path).with_context(|| format!("cannot open directory {}", path.display()))?;
+    ensure!(file.metadata()?.is_dir(), "opened path is not a directory");
+    Ok(file)
+}
+
+#[cfg(target_os = "linux")]
+fn open_regular_file_nofollow(path: &Path) -> Result<File> {
+    const O_NOFOLLOW: i32 = 0o400000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("cannot securely open file {}", path.display()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_regular_file_nofollow(path: &Path) -> Result<File> {
+    File::open(path).with_context(|| format!("cannot open file {}", path.display()))
+}
+
+#[cfg(target_os = "linux")]
+fn anchored_child_path(parent: &File, _parent_path: &Path, name: &OsStr) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd())).join(name)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn anchored_child_path(_parent: &File, parent_path: &Path, name: &OsStr) -> PathBuf {
+    parent_path.join(name)
+}
+
+#[cfg(target_os = "linux")]
+fn anchored_directory_path(parent: &File, _parent_path: &Path) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn anchored_directory_path(_parent: &File, parent_path: &Path) -> PathBuf {
+    parent_path.to_path_buf()
+}
+
 pub(crate) fn persist_diagnostic(
     prepared: PreparedDiagnosticPath,
     report: &DiagnosticReport,
@@ -420,15 +546,16 @@ pub(crate) fn persist_diagnostic(
         serde_json::to_vec_pretty(report).context("cannot serialize diagnostic JSON")?;
     bytes.push(b'\n');
 
-    let path = prepared.path;
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("diagnostic path has no parent directory"))?;
-    reject_symlinks(&path)?;
-    ensure!(!path.exists(), "diagnostic target already exists");
+    let parent = anchored_directory_path(&prepared.parent, &prepared.parent_path);
+    let target = anchored_child_path(&prepared.parent, &prepared.parent_path, &prepared.file_name);
+    ensure!(
+        fs::symlink_metadata(&target)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+        "diagnostic target already exists or cannot be inspected"
+    );
     let mut temporary = tempfile::Builder::new()
         .prefix(".aurscan-eval-")
-        .tempfile_in(parent)
+        .tempfile_in(&parent)
         .context("cannot create same-directory diagnostic temporary file")?;
     set_file_mode(temporary.as_file())?;
     temporary
@@ -444,10 +571,13 @@ pub(crate) fn persist_diagnostic(
         .sync_all()
         .context("cannot sync diagnostic temporary file")?;
     temporary
-        .persist_noclobber(&path)
+        .persist_noclobber(&target)
         .map_err(|error| error.error)
         .context("cannot atomically publish diagnostic without clobbering")?;
-    sync_directory(parent).context("cannot sync diagnostic directory")?;
+    prepared
+        .parent
+        .sync_all()
+        .context("cannot sync diagnostic directory")?;
     Ok(())
 }
 
@@ -460,18 +590,6 @@ fn set_file_mode(file: &File) -> Result<()> {
 
 #[cfg(not(unix))]
 fn set_file_mode(_file: &File) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<()> {
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .context("cannot sync directory")
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_directory: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -499,6 +617,7 @@ pub(crate) fn validate_report(report: &DiagnosticReport) -> Result<()> {
         ("response schema", report.response_schema_hash.as_str()),
         ("corpus manifest", report.corpus_manifest_hash.as_str()),
         ("oracle", report.oracle_hash.as_str()),
+        ("corpus content", report.corpus_content_hash.as_str()),
         ("analysis contract", report.analysis_contract_hash.as_str()),
     ] {
         ensure!(
@@ -699,9 +818,6 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn identity() -> AnalysisContractIdentity {
         AnalysisContractIdentity {
@@ -716,6 +832,7 @@ mod tests {
             review_strategy_id: "findings_first_v1".to_owned(),
             corpus_manifest_hash: "44".repeat(32),
             oracle_hash: "55".repeat(32),
+            corpus_content_hash: "66".repeat(32),
         }
     }
 
@@ -729,7 +846,7 @@ mod tests {
             generated_at: 1,
             git_commit: "a".repeat(40),
             model_id: identity.model_id.clone(),
-            endpoint_origin_fingerprint: "66".repeat(32),
+            endpoint_origin_fingerprint: "77".repeat(32),
             request_profile: identity.request_profile.clone(),
             request_profile_fingerprint: identity.request_profile_fingerprint.clone(),
             review_strategy_id: identity.review_strategy_id.clone(),
@@ -740,6 +857,7 @@ mod tests {
             analysis_epoch: identity.analysis_epoch,
             corpus_manifest_hash: identity.corpus_manifest_hash.clone(),
             oracle_hash: identity.oracle_hash.clone(),
+            corpus_content_hash: identity.corpus_content_hash.clone(),
             analysis_contract_hash: analysis_contract_hash(&identity),
             selected_case_ids: vec!["case-one".to_owned()],
             metrics: EvaluationMetrics {
@@ -824,8 +942,11 @@ mod tests {
         let mut changed = base.clone();
         changed.corpus_manifest_hash.replace_range(0..1, "5");
         mutations.push(changed);
-        let mut changed = base;
+        let mut changed = base.clone();
         changed.oracle_hash.replace_range(0..1, "6");
+        mutations.push(changed);
+        let mut changed = base;
+        changed.corpus_content_hash.replace_range(0..1, "7");
         mutations.push(changed);
 
         for mutation in mutations {
@@ -851,7 +972,7 @@ mod tests {
         let mut changed = original;
         changed.git_commit = "b".repeat(40);
         changed.selected_case_ids = vec!["different-case".to_owned()];
-        changed.endpoint_origin_fingerprint = "77".repeat(32);
+        changed.endpoint_origin_fingerprint = "88".repeat(32);
         assert_eq!(
             analysis_contract_hash(&contract_identity(&changed)),
             expected
@@ -880,28 +1001,26 @@ mod tests {
     }
 
     #[test]
-    fn empty_xdg_state_home_falls_back_to_home_local_state() {
-        let _environment = ENV_LOCK.lock().unwrap();
-        let temporary = tempfile::tempdir().unwrap();
-        let previous_xdg_state_home = env::var_os("XDG_STATE_HOME");
-        let previous_home = env::var_os("HOME");
-        env::set_var("XDG_STATE_HOME", "");
-        env::set_var("HOME", temporary.path());
-
-        let resolved = state_home();
-
-        if let Some(value) = previous_xdg_state_home {
-            env::set_var("XDG_STATE_HOME", value);
-        } else {
-            env::remove_var("XDG_STATE_HOME");
+    fn state_home_resolution_falls_back_from_empty_xdg_and_rejects_relative_roots() {
+        assert_eq!(
+            state_home_from(Some(OsStr::new("")), Some(OsStr::new("/home/test"))).unwrap(),
+            Path::new("/home/test/.local/state")
+        );
+        assert_eq!(
+            state_home_from(
+                Some(OsStr::new("/var/lib/aurscan-state")),
+                Some(OsStr::new("/home/test")),
+            )
+            .unwrap(),
+            Path::new("/var/lib/aurscan-state")
+        );
+        for (xdg, home) in [
+            (Some(OsStr::new("relative")), Some(OsStr::new("/home/test"))),
+            (Some(OsStr::new("")), Some(OsStr::new("relative"))),
+            (Some(OsStr::new("/tmp/../escape")), None),
+        ] {
+            assert!(state_home_from(xdg, home).is_err());
         }
-        if let Some(value) = previous_home {
-            env::set_var("HOME", value);
-        } else {
-            env::remove_var("HOME");
-        }
-
-        assert_eq!(resolved.unwrap(), temporary.path().join(".local/state"));
     }
 
     #[test]
@@ -1033,6 +1152,45 @@ mod tests {
         let target = state_home.join("aurscan/eval-runs/report.json");
         symlink(outside.path().join("missing"), &target).unwrap();
         assert!(prepare_new_diagnostic_path(state_home, &target).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn diagnostic_publication_is_anchored_when_parent_path_is_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let state_home = temporary.path();
+        let parent = state_home.join("aurscan/eval-runs/nested");
+        let target = parent.join("report.json");
+        let prepared = prepare_new_diagnostic_path(state_home, &target).unwrap();
+        let retained_parent = state_home.join("retained-parent");
+        fs::rename(&parent, &retained_parent).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), &parent).unwrap();
+
+        persist_diagnostic(prepared, &report()).unwrap();
+
+        assert!(retained_parent.join("report.json").is_file());
+        assert!(!outside.path().join("report.json").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn promotion_read_is_anchored_when_parent_path_is_replaced() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_home = temporary.path();
+        let parent = state_home.join("aurscan/eval-runs");
+        fs::create_dir_all(&parent).unwrap();
+        let target = parent.join("promotion.json");
+        fs::write(&target, b"original\n").unwrap();
+        let mut opened = open_existing_diagnostic_path(state_home, &target).unwrap();
+        let retained_parent = state_home.join("retained-parent");
+        fs::rename(&parent, &retained_parent).unwrap();
+        fs::create_dir(&parent).unwrap();
+        fs::write(&target, b"replacement\n").unwrap();
+
+        assert_eq!(opened.read_bytes().unwrap(), b"original\n");
     }
 
     #[test]

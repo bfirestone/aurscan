@@ -18,11 +18,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 
 const REFERENCE_REPORT_PATH: &str = "crates/aurscan-llm/eval/reference-reports/v1.json";
 const PROMOTION_DIAGNOSTIC_ENV: &str = "AURSCAN_LLM_EVAL_PROMOTION_DIAGNOSTIC";
@@ -101,11 +107,17 @@ struct RunIdentity {
     analysis_epoch: u32,
     corpus_manifest_hash: String,
     oracle_hash: String,
+    corpus_content_hash: String,
     analysis_contract_hash: String,
 }
 
 #[derive(Debug)]
 struct PromotionPermit(());
+
+enum PromotionSource<'a> {
+    Configured,
+    Bytes { bytes: &'a [u8], digest: &'a str },
+}
 
 #[derive(Debug, Serialize)]
 struct ReferenceReport {
@@ -124,6 +136,7 @@ struct ReferenceReport {
     analysis_epoch: u32,
     corpus_manifest_hash: String,
     oracle_hash: String,
+    corpus_content_hash: String,
     analysis_contract_hash: String,
     metrics: EvaluationMetrics,
     case_results: Vec<ReferenceCaseResult>,
@@ -202,12 +215,18 @@ fn run_live_evaluation(run_kind: RunKind) -> Result<()> {
     };
     let mut candidate_cleanup = reference_output
         .as_deref()
-        .map(CandidateCleanup::for_output)
+        .map(|output| CandidateCleanup::for_output(&workspace, output))
         .transpose()?;
 
     let validated =
         validate_config(&config).map_err(|_| anyhow!("LLM configuration validation failed"))?;
     let mut inputs = build_evaluation_inputs(&workspace, &validated, &data, run_kind)?;
+    corpus::validate_model_facing_bundles(
+        &data,
+        inputs
+            .iter()
+            .map(|input| (input.id.as_str(), &input.bundle)),
+    )?;
     ensure!(
         !inputs.is_empty() && inputs.len() <= validated.max_requests_per_run(),
         "configured max_requests_per_run={} cannot cover {} evaluation bundles",
@@ -231,14 +250,36 @@ fn run_live_evaluation(run_kind: RunKind) -> Result<()> {
     let analyzer = Analyzer::with_cache_path(validated, cache_path)
         .context("cannot initialize concrete LLM analyzer")?;
     let provider_identity = analyzer.analysis_identity(&inputs[0].bundle);
-    let run_identity = build_run_identity(request_profile, &provider_identity, &data)?;
-    let promotion = match run_kind {
+    let corpus_content_hash = corpus::corpus_content_hash(
+        inputs
+            .iter()
+            .map(|input| (input.id.as_str(), &input.bundle)),
+    )?;
+    let run_identity = build_run_identity(
+        request_profile,
+        &provider_identity,
+        &data,
+        corpus_content_hash,
+    )?;
+    let promotion_identity = match run_kind {
         RunKind::Calibration => None,
-        RunKind::Qualification => Some(load_and_verify_promotion(&run_identity, &data)?),
+        RunKind::Qualification => {
+            let calibration_bundles = corpus::calibration_bundles(&data)?;
+            let calibration_content_hash = corpus::corpus_content_hash(
+                calibration_bundles
+                    .iter()
+                    .map(|(id, bundle)| (id.as_str(), bundle)),
+            )?;
+            Some(build_run_identity(
+                request_profile,
+                &provider_identity,
+                &data,
+                calibration_content_hash,
+            )?)
+        }
     };
 
     let execute = || {
-        require_configured_api_key(&config)?;
         let results = evaluate_inputs(&analyzer, &mut inputs, data.benign.packages.len())?;
         finalize_run(
             run_kind,
@@ -251,10 +292,14 @@ fn run_live_evaluation(run_kind: RunKind) -> Result<()> {
         )
     };
 
-    match promotion {
-        None => execute(),
-        Some(permit) => after_verified_promotion(Ok(permit), execute),
-    }
+    orchestrate_provider_boundaries(
+        run_kind,
+        promotion_identity.as_ref(),
+        &data,
+        (run_kind == RunKind::Qualification).then_some(PromotionSource::Configured),
+        || require_configured_api_key(&config),
+        execute,
+    )
 }
 
 fn build_evaluation_inputs<'a>(
@@ -650,6 +695,7 @@ fn finalize_run(
         analysis_epoch: identity.analysis_epoch,
         corpus_manifest_hash: identity.corpus_manifest_hash.clone(),
         oracle_hash: identity.oracle_hash.clone(),
+        corpus_content_hash: identity.corpus_content_hash.clone(),
         analysis_contract_hash: identity.analysis_contract_hash.clone(),
         selected_case_ids,
         metrics: results.metrics.clone(),
@@ -690,6 +736,7 @@ fn finalize_run(
         analysis_epoch: identity.analysis_epoch,
         corpus_manifest_hash: identity.corpus_manifest_hash,
         oracle_hash: identity.oracle_hash,
+        corpus_content_hash: identity.corpus_content_hash,
         analysis_contract_hash: identity.analysis_contract_hash,
         metrics: results.metrics,
         case_results: results.reference_cases,
@@ -701,6 +748,7 @@ fn build_run_identity(
     profile: ChatCompletionsProfile,
     identity: &AnalysisIdentity,
     data: &CorpusData,
+    corpus_content_hash: String,
 ) -> Result<RunIdentity> {
     ensure!(
         profile == ChatCompletionsProfile::OpenAiReasoningNone,
@@ -722,6 +770,7 @@ fn build_run_identity(
         review_strategy_id: identity.review_strategy_id.clone(),
         corpus_manifest_hash: corpus_manifest_hash.clone(),
         oracle_hash: oracle_hash.clone(),
+        corpus_content_hash: corpus_content_hash.clone(),
     };
     Ok(RunIdentity {
         model_id: contract.model_id.clone(),
@@ -736,26 +785,23 @@ fn build_run_identity(
         analysis_epoch: contract.analysis_epoch,
         corpus_manifest_hash,
         oracle_hash,
+        corpus_content_hash,
         analysis_contract_hash: diagnostic::analysis_contract_hash(&contract),
     })
 }
 
 fn load_and_verify_promotion(identity: &RunIdentity, data: &CorpusData) -> Result<PromotionPermit> {
-    let path = diagnostic::configured_existing_path(PROMOTION_DIAGNOSTIC_ENV)?;
+    let mut opened = diagnostic::configured_existing_path(PROMOTION_DIAGNOSTIC_ENV)?;
     let configured_sha = env::var(PROMOTION_SHA256_ENV).map_err(|_| {
         anyhow!("{PROMOTION_SHA256_ENV} must contain the recorded lowercase SHA-256")
     })?;
-    let bytes = fs::read(&path).context("cannot read promotion diagnostic")?;
-    verify_promotion_bytes(
-        &bytes,
-        &configured_sha,
-        identity,
-        &corpus::expected_calibration_ids(),
-    )?;
-    ensure!(
-        data.manifest.schema_version == 2,
-        "promotion requires corpus manifest schema 2"
-    );
+    let bytes = opened.read_bytes().with_context(|| {
+        format!(
+            "cannot read promotion diagnostic {}",
+            opened.path().display()
+        )
+    })?;
+    verify_promotion_bytes(&bytes, &configured_sha, identity, data)?;
     Ok(PromotionPermit(()))
 }
 
@@ -763,8 +809,25 @@ fn verify_promotion_bytes(
     bytes: &[u8],
     configured_sha: &str,
     identity: &RunIdentity,
-    expected_selected_ids: &[String],
+    data: &CorpusData,
 ) -> Result<DiagnosticReport> {
+    ensure!(
+        data.manifest.schema_version == 2,
+        "promotion requires corpus manifest schema 2"
+    );
+    ensure!(
+        identity.corpus_manifest_hash == hex(blake3::hash(&data.manifest_bytes).as_bytes())
+            && identity.oracle_hash == hex(blake3::hash(&data.oracle_bytes).as_bytes()),
+        "promotion identity does not bind the current manifest and oracle"
+    );
+    let bundles = corpus::calibration_bundles(data)?;
+    let current_content_hash =
+        corpus::corpus_content_hash(bundles.iter().map(|(id, bundle)| (id.as_str(), bundle)))?;
+    ensure!(
+        identity.corpus_content_hash == current_content_hash,
+        "promotion identity does not bind the current calibration corpus"
+    );
+    let expected_selected_ids = corpus::expected_calibration_ids();
     ensure!(
         diagnostic::is_lower_hex_digest(configured_sha),
         "promotion diagnostic SHA-256 must be lowercase hexadecimal"
@@ -790,7 +853,7 @@ fn verify_promotion_bytes(
         report.outcome == RunOutcome::Passed && report.failed_threshold_ids.is_empty(),
         "promotion diagnostic did not pass"
     );
-    validate_promotion_metrics(&report)?;
+    validate_promotion_metrics(&report, data, &bundles)?;
     ensure!(
         threshold_failures(RunKind::Calibration, &report.metrics).is_empty(),
         "promotion diagnostic metrics do not pass calibration thresholds"
@@ -800,8 +863,9 @@ fn verify_promotion_bytes(
         "promotion diagnostic selection changed"
     );
     ensure!(
-        report.model_id == identity.model_id,
-        "promotion diagnostic model changed"
+        report.model_id == identity.model_id
+            && report.endpoint_origin_fingerprint == identity.endpoint_origin_fingerprint,
+        "promotion diagnostic model or endpoint origin changed"
     );
     ensure!(
         report.request_profile == identity.request_profile
@@ -820,14 +884,92 @@ fn verify_promotion_bytes(
             && report.analysis_epoch == identity.analysis_epoch
             && report.review_strategy_id == identity.review_strategy_id
             && report.corpus_manifest_hash == identity.corpus_manifest_hash
-            && report.oracle_hash == identity.oracle_hash,
+            && report.oracle_hash == identity.oracle_hash
+            && report.corpus_content_hash == identity.corpus_content_hash,
         "promotion diagnostic identity fields changed"
     );
     Ok(report)
 }
 
-fn validate_promotion_metrics(report: &DiagnosticReport) -> Result<()> {
+fn validate_promotion_metrics(
+    report: &DiagnosticReport,
+    data: &CorpusData,
+    bundles: &[(String, RecipeBundle)],
+) -> Result<()> {
     let cases = &report.case_results;
+    ensure!(
+        cases.len() == bundles.len()
+            && cases
+                .iter()
+                .map(|case| case.id.as_str())
+                .eq(bundles.iter().map(|(id, _)| id.as_str())),
+        "promotion cases do not match current bundle order"
+    );
+    for (case, (id, bundle)) in cases.iter().zip(bundles) {
+        let manifest_case = data.manifest.cases.iter().find(|entry| entry.id == *id);
+        let (expected_category, expected_kinds, allowed_evidence) =
+            if let Some(manifest_case) = manifest_case {
+                (
+                    manifest_case.category.as_str(),
+                    manifest_case.expected_kinds.as_slice(),
+                    manifest_case.allowed_evidence.as_slice(),
+                )
+            } else {
+                ensure!(
+                    data.benign
+                        .packages
+                        .iter()
+                        .any(|package| package.pkgbase == *id),
+                    "promotion contains a case absent from the current corpus"
+                );
+                ("benign_snapshot", &[][..], &[][..])
+            };
+        ensure!(
+            case.category == expected_category && case.expected_kinds == expected_kinds,
+            "promotion case {id} category or expected kinds disagree with the current oracle"
+        );
+        ensure!(
+            case.status == DiagnosticStatus::Completed && case.grounded,
+            "promotion case {id} status or grounding cannot be rederived as passing"
+        );
+        for finding in &case.accepted_findings {
+            ensure!(
+                LlmFindingKind::ALL
+                    .into_iter()
+                    .any(|kind| corpus::kind_name(kind) == finding.kind),
+                "promotion case {id} has an unknown accepted kind"
+            );
+            let file = bundle
+                .files
+                .iter()
+                .find(|file| file.path == finding.relative_file)
+                .ok_or_else(|| anyhow!("promotion case {id} coordinate is outside its bundle"))?;
+            ensure!(
+                finding.start_line > 0
+                    && finding.start_line <= finding.end_line
+                    && finding.end_line <= host_line_count(&file.content),
+                "promotion case {id} coordinate is outside current host bytes"
+            );
+        }
+        let expected_hit = manifest_case.is_some()
+            && case.accepted_findings.iter().any(|finding| {
+                expected_kinds.iter().any(|kind| kind == &finding.kind)
+                    && allowed_evidence.iter().any(|allowed| {
+                        allowed.file == finding.relative_file
+                            && (allowed.start_line_min..=allowed.end_line_max)
+                                .contains(&finding.start_line)
+                    })
+            });
+        ensure!(
+            case.expected_hit == expected_hit,
+            "promotion case {id} expected-hit claim does not rederive from current host data"
+        );
+    }
+    let unique_bundle_hashes = bundles
+        .iter()
+        .map(|(_, bundle)| bundle.content_hash)
+        .collect::<BTreeSet<_>>()
+        .len();
     let semantic_cases = cases
         .iter()
         .filter(|case| EXPECTED_CASE_IDS.contains(&case.id.as_str()))
@@ -932,6 +1074,9 @@ fn validate_promotion_metrics(report: &DiagnosticReport) -> Result<()> {
                 unavailable + incomplete,
                 cases.len()
             )
+            && metrics.llm_block_count == 0
+            && metrics.request_count == unique_bundle_hashes
+            && metrics.cache_hit_count == cases.len() - unique_bundle_hashes
             && metrics.completed_count == completed
             && metrics.unavailable_count == unavailable
             && metrics.incomplete_count == incomplete
@@ -947,11 +1092,34 @@ fn percentage_matches(actual: f64, numerator: usize, denominator: usize) -> bool
     (actual - percentage(numerator, denominator)).abs() <= f64::EPSILON
 }
 
-fn after_verified_promotion<T>(
-    permit: Result<PromotionPermit>,
+fn orchestrate_provider_boundaries<T>(
+    run_kind: RunKind,
+    promotion_identity: Option<&RunIdentity>,
+    data: &CorpusData,
+    promotion_source: Option<PromotionSource<'_>>,
+    key_lookup: impl FnOnce() -> Result<()>,
     provider_action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let _permit = permit?;
+    match run_kind {
+        RunKind::Calibration => ensure!(
+            promotion_identity.is_none() && promotion_source.is_none(),
+            "calibration unexpectedly acquired promotion state"
+        ),
+        RunKind::Qualification => {
+            let identity = promotion_identity
+                .ok_or_else(|| anyhow!("qualification promotion identity is missing"))?;
+            let source = promotion_source
+                .ok_or_else(|| anyhow!("qualification promotion artifact is missing"))?;
+            let _permit = match source {
+                PromotionSource::Configured => load_and_verify_promotion(identity, data)?,
+                PromotionSource::Bytes { bytes, digest } => {
+                    verify_promotion_bytes(bytes, digest, identity, data)?;
+                    PromotionPermit(())
+                }
+            };
+        }
+    }
+    key_lookup()?;
     provider_action()
 }
 
@@ -994,15 +1162,30 @@ fn run_kind_allows_reference_publication(run_kind: RunKind) -> bool {
 }
 
 fn load_config() -> Result<LlmConfig> {
-    let config_home = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or_else(|| anyhow!("XDG_CONFIG_HOME or HOME is required to locate the LLM config"))?;
+    let xdg = env::var_os("XDG_CONFIG_HOME");
+    let home = env::var_os("HOME");
+    let config_home = config_home_from(xdg.as_deref(), home.as_deref())?;
     let path = config_home.join("aurscan/config.toml");
     let text = fs::read_to_string(&path).context("cannot read normal XDG aurscan config")?;
     let root: RootConfig = toml::from_str(&text)
         .context("normal XDG aurscan config has an invalid experimental.llm section")?;
     Ok(root.experimental.llm)
+}
+
+fn config_home_from(xdg: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf> {
+    let config_home = xdg
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|value| PathBuf::from(value).join(".config")))
+        .ok_or_else(|| anyhow!("XDG_CONFIG_HOME or HOME is required to locate the LLM config"))?;
+    ensure!(config_home.is_absolute(), "config home must be absolute");
+    ensure!(
+        config_home
+            .components()
+            .all(|component| !matches!(component, Component::CurDir | Component::ParentDir)),
+        "config home contains traversal"
+    );
+    Ok(config_home)
 }
 
 fn validate_live_config(config: &LlmConfig) -> Result<()> {
@@ -1078,19 +1261,61 @@ fn normalized_absolute_path(workspace: &Path, path: &Path) -> Result<PathBuf> {
 }
 
 struct CandidateCleanup {
-    path: PathBuf,
+    output_path: PathBuf,
+    directory_path: PathBuf,
+    directory: File,
+    output_name: OsString,
+    candidate_name: OsString,
+    existing_output: Option<File>,
     armed: bool,
 }
 
 impl CandidateCleanup {
-    fn for_output(output: &Path) -> Result<Self> {
-        let path = candidate_path(output)?;
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error).context("cannot remove stale reference candidate"),
-        }
-        Ok(Self { path, armed: true })
+    fn for_output(workspace: &Path, output: &Path) -> Result<Self> {
+        let canonical_workspace = workspace
+            .canonicalize()
+            .context("cannot canonicalize workspace for reference publication")?;
+        ensure!(
+            output.is_absolute() && output.starts_with(&canonical_workspace),
+            "reference report must be beneath the canonical workspace"
+        );
+        let directory_path = output
+            .parent()
+            .ok_or_else(|| anyhow!("reference report path has no parent directory"))?;
+        let directory = open_reference_directory_beneath(&canonical_workspace, directory_path)?;
+        let output_name = output
+            .file_name()
+            .ok_or_else(|| anyhow!("reference report path has no file name"))?
+            .to_os_string();
+        let candidate_name = candidate_path(output)?
+            .file_name()
+            .ok_or_else(|| anyhow!("reference candidate path has no file name"))?
+            .to_os_string();
+        let candidate = reference_child_path(&directory, directory_path, &candidate_name);
+        ensure!(
+            fs::symlink_metadata(&candidate)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "reference report candidate already exists or cannot be inspected"
+        );
+        let final_path = reference_child_path(&directory, directory_path, &output_name);
+        let existing_output = open_optional_reference_file(&final_path)?;
+        Ok(Self {
+            output_path: output.to_path_buf(),
+            directory_path: directory_path.to_path_buf(),
+            directory,
+            output_name,
+            candidate_name,
+            existing_output,
+            armed: true,
+        })
+    }
+
+    fn candidate(&self) -> PathBuf {
+        reference_child_path(&self.directory, &self.directory_path, &self.candidate_name)
+    }
+
+    fn output(&self) -> PathBuf {
+        reference_child_path(&self.directory, &self.directory_path, &self.output_name)
     }
 
     fn disarm(&mut self) {
@@ -1101,12 +1326,15 @@ impl CandidateCleanup {
 impl Drop for CandidateCleanup {
     fn drop(&mut self) {
         if self.armed {
-            match fs::remove_file(&self.path) {
+            match fs::remove_file(self.candidate()) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => eprintln!(
                     "failed to clean reference candidate {}: {}",
-                    diagnostic::terminal_escape(&self.path.to_string_lossy()),
+                    diagnostic::terminal_escape(&candidate_path(&self.output_path).map_or_else(
+                        |_| "<invalid-candidate>".into(),
+                        |path| path.to_string_lossy().into_owned()
+                    )),
                     diagnostic::terminal_escape(&error.to_string())
                 ),
             }
@@ -1125,66 +1353,203 @@ fn candidate_path(output: &Path) -> Result<PathBuf> {
     Ok(directory.join(format!("{file_name}.candidate")))
 }
 
+fn open_reference_directory_beneath(workspace: &Path, path: &Path) -> Result<File> {
+    let relative = path
+        .strip_prefix(workspace)
+        .context("reference path escapes canonical workspace")?;
+    let mut current_path = workspace.to_path_buf();
+    let mut current = open_reference_directory(workspace)?;
+    for component in relative.components() {
+        let Component::Normal(part) = component else {
+            bail!("reference path contains traversal");
+        };
+        let child = reference_child_path(&current, &current_path, part);
+        match fs::symlink_metadata(&child) {
+            Ok(metadata) => ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "reference path component is not a real directory"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&child).context("cannot create reference report directory")?;
+            }
+            Err(error) => return Err(error).context("cannot inspect reference path component"),
+        }
+        current = open_reference_directory(&child)?;
+        current_path.push(part);
+    }
+    Ok(current)
+}
+
+#[cfg(target_os = "linux")]
+fn open_reference_directory(path: &Path) -> Result<File> {
+    const O_DIRECTORY: i32 = 0o200000;
+    const O_NOFOLLOW: i32 = 0o400000;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_DIRECTORY | O_NOFOLLOW)
+        .open(path)
+        .context("cannot securely open reference report directory")?;
+    ensure!(
+        directory.metadata()?.is_dir(),
+        "reference parent is not a directory"
+    );
+    Ok(directory)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_reference_directory(path: &Path) -> Result<File> {
+    let directory = File::open(path).context("cannot open reference report directory")?;
+    ensure!(
+        directory.metadata()?.is_dir(),
+        "reference parent is not a directory"
+    );
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+fn reference_child_path(directory: &File, _directory_path: &Path, name: &OsStr) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd())).join(name)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reference_child_path(_directory: &File, directory_path: &Path, name: &OsStr) -> PathBuf {
+    directory_path.join(name)
+}
+
+#[cfg(target_os = "linux")]
+fn open_optional_reference_file(path: &Path) -> Result<Option<File>> {
+    const O_NOFOLLOW: i32 = 0o400000;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "reference report final path is not a real file"
+            );
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(O_NOFOLLOW)
+                .open(path)
+                .context("cannot securely retain existing reference report")?;
+            ensure!(file.metadata()?.is_file(), "reference final is not a file");
+            Ok(Some(file))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("cannot inspect reference report final path"),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_optional_reference_file(path: &Path) -> Result<Option<File>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "reference report final path is not a real file"
+            );
+            Ok(Some(
+                File::open(path).context("cannot retain existing reference report")?,
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).context("cannot inspect reference report final path"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn create_reference_candidate(path: &Path) -> Result<File> {
+    const O_NOFOLLOW: i32 = 0o400000;
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .context("cannot exclusively create reference report candidate")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_reference_candidate(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .context("cannot exclusively create reference report candidate")
+}
+
+fn ensure_reference_final_unchanged(cleanup: &CandidateCleanup) -> Result<()> {
+    let current = open_optional_reference_file(&cleanup.output())?;
+    match (&cleanup.existing_output, current) {
+        (None, None) => Ok(()),
+        (Some(expected), Some(current)) => same_open_file(expected, &current),
+        _ => bail!("reference report final path changed during publication"),
+    }
+}
+
+#[cfg(unix)]
+fn same_open_file(left: &File, right: &File) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let left = left.metadata()?;
+    let right = right.metadata()?;
+    ensure!(
+        left.dev() == right.dev() && left.ino() == right.ino(),
+        "reference report final file changed during publication"
+    );
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn same_open_file(left: &File, right: &File) -> Result<()> {
+    ensure!(
+        left.metadata()?.len() == right.metadata()?.len(),
+        "reference report final file changed during publication"
+    );
+    Ok(())
+}
+
 fn write_candidate_and_accept(
     output: &Path,
     report: &ReferenceReport,
     candidate_cleanup: &mut CandidateCleanup,
 ) -> Result<()> {
-    let directory = output
-        .parent()
-        .ok_or_else(|| anyhow!("reference report path has no parent directory"))?;
-    fs::create_dir_all(directory).context("cannot create reference report directory")?;
     ensure!(
-        candidate_cleanup.path == candidate_path(output)?,
-        "reference report candidate path changed"
+        candidate_cleanup.output_path == output,
+        "reference report output path changed"
     );
     let value = serde_json::to_value(report).context("cannot inspect reference report")?;
     diagnostic::ensure_no_forbidden_keys(&value)?;
     let mut bytes =
         serde_json::to_vec_pretty(report).context("cannot serialize reference report")?;
     bytes.push(b'\n');
-    let mut candidate = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&candidate_cleanup.path)
-        .context("cannot create temporary reference report candidate")?;
+    let candidate_path = candidate_cleanup.candidate();
+    let mut candidate = create_reference_candidate(&candidate_path)?;
     candidate
         .write_all(&bytes)
-        .context("cannot write temporary reference report candidate")?;
+        .context("cannot write reference report candidate")?;
     candidate
         .flush()
-        .context("cannot flush temporary reference report candidate")?;
+        .context("cannot flush reference report candidate")?;
     candidate
         .sync_all()
-        .context("cannot sync temporary reference report candidate")?;
-    drop(candidate);
+        .context("cannot sync reference report candidate")?;
 
     let failures = threshold_failures(RunKind::Qualification, &report.metrics);
     if !failures.is_empty() {
-        fs::remove_file(&candidate_cleanup.path)
+        drop(candidate);
+        fs::remove_file(&candidate_path)
             .context("cannot remove rejected reference report candidate")?;
         bail!(
             "live evaluation release thresholds failed without accepting a report: {}",
             failures.join(",")
         );
     }
-    fs::rename(&candidate_cleanup.path, output)
+    ensure_reference_final_unchanged(candidate_cleanup)?;
+    drop(candidate);
+    fs::rename(&candidate_path, candidate_cleanup.output())
         .context("cannot atomically accept reference report")?;
-    sync_directory(directory).context("cannot sync accepted reference report directory")?;
+    candidate_cleanup
+        .directory
+        .sync_all()
+        .context("cannot sync accepted reference report directory")?;
     candidate_cleanup.disarm();
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> Result<()> {
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .context("cannot sync directory")
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_directory: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -1271,8 +1636,8 @@ mod tests {
             benign_unlabelled_advisory_rate: 0.0,
             llm_block_count: 0,
             invalid_or_incomplete_rate: 0.0,
-            request_count: 17,
-            cache_hit_count: 0,
+            request_count: 16,
+            cache_hit_count: 1,
             input_tokens: None,
             output_tokens: None,
             latency_ms: 0,
@@ -1295,6 +1660,7 @@ mod tests {
             review_strategy_id: "findings_first_v1".to_owned(),
             corpus_manifest_hash: "44".repeat(32),
             oracle_hash: "55".repeat(32),
+            corpus_content_hash: "66".repeat(32),
         };
         RunIdentity {
             model_id: contract.model_id.clone(),
@@ -1309,11 +1675,38 @@ mod tests {
             analysis_epoch: contract.analysis_epoch,
             corpus_manifest_hash: contract.corpus_manifest_hash.clone(),
             oracle_hash: contract.oracle_hash.clone(),
+            corpus_content_hash: contract.corpus_content_hash.clone(),
             analysis_contract_hash: diagnostic::analysis_contract_hash(&contract),
         }
     }
 
-    fn promotion_report(identity: &RunIdentity) -> DiagnosticReport {
+    fn promotion_identity(data: &CorpusData) -> RunIdentity {
+        let mut identity = identity();
+        identity.corpus_manifest_hash = hex(blake3::hash(&data.manifest_bytes).as_bytes());
+        identity.oracle_hash = hex(blake3::hash(&data.oracle_bytes).as_bytes());
+        let bundles = corpus::calibration_bundles(data).unwrap();
+        identity.corpus_content_hash =
+            corpus::corpus_content_hash(bundles.iter().map(|(id, bundle)| (id.as_str(), bundle)))
+                .unwrap();
+        identity.analysis_contract_hash =
+            diagnostic::analysis_contract_hash(&AnalysisContractIdentity {
+                model_id: identity.model_id.clone(),
+                request_profile: identity.request_profile.clone(),
+                request_profile_fingerprint: identity.request_profile_fingerprint.clone(),
+                prompt_version: identity.prompt_version,
+                prompt_hash: identity.prompt_hash.clone(),
+                response_schema_version: identity.response_schema_version,
+                response_schema_hash: identity.response_schema_hash.clone(),
+                analysis_epoch: identity.analysis_epoch,
+                review_strategy_id: identity.review_strategy_id.clone(),
+                corpus_manifest_hash: identity.corpus_manifest_hash.clone(),
+                oracle_hash: identity.oracle_hash.clone(),
+                corpus_content_hash: identity.corpus_content_hash.clone(),
+            });
+        identity
+    }
+
+    fn promotion_report(identity: &RunIdentity, data: &CorpusData) -> DiagnosticReport {
         let selected_case_ids = corpus::expected_calibration_ids();
         DiagnosticReport {
             schema_version: 1,
@@ -1334,6 +1727,7 @@ mod tests {
             analysis_epoch: identity.analysis_epoch,
             corpus_manifest_hash: identity.corpus_manifest_hash.clone(),
             oracle_hash: identity.oracle_hash.clone(),
+            corpus_content_hash: identity.corpus_content_hash.clone(),
             analysis_contract_hash: identity.analysis_contract_hash.clone(),
             selected_case_ids: selected_case_ids.clone(),
             metrics: passing_metrics(),
@@ -1341,44 +1735,22 @@ mod tests {
                 .into_iter()
                 .enumerate()
                 .map(|(index, id)| {
-                    let (category, expected_kinds) = match id.as_str() {
-                        "obfuscated-download" | "download-base" | "download-injected" => (
-                            if id.starts_with("download-") {
-                                "paired"
-                            } else {
-                                "semantic_malicious"
-                            },
-                            vec!["obfuscated_execution", "download_execute"],
-                        ),
-                        "credential-exfil" => (
-                            "semantic_malicious",
-                            vec!["credential_access", "data_exfiltration"],
-                        ),
-                        "cross-file-persistence" => (
-                            "semantic_malicious",
-                            vec!["persistence_privilege", "build_install_boundary"],
-                        ),
-                        "schema-forgery" => {
-                            ("injection", vec!["obfuscated_execution", "other_semantic"])
-                        }
-                        "external-citation" => (
-                            "injection",
-                            vec!["credential_access", "data_exfiltration", "other_semantic"],
-                        ),
-                        _ => ("benign_snapshot", Vec::new()),
-                    };
+                    let manifest_case = data.manifest.cases.iter().find(|case| case.id == id);
+                    let category =
+                        manifest_case.map_or("benign_snapshot", |case| case.category.as_str());
+                    let expected_kinds =
+                        manifest_case.map_or_else(Vec::new, |case| case.expected_kinds.clone());
                     let expected_hit = index < CALIBRATION_SEMANTIC_HITS;
-                    let expected_kinds = expected_kinds
-                        .into_iter()
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
                     let accepted_findings = expected_hit
-                        .then(|| DiagnosticFindingRef {
-                            kind: expected_kinds[0].clone(),
-                            severity: "high".to_owned(),
-                            relative_file: "PKGBUILD".to_owned(),
-                            start_line: 1,
-                            end_line: 1,
+                        .then(|| {
+                            let evidence = &manifest_case.unwrap().allowed_evidence[0];
+                            DiagnosticFindingRef {
+                                kind: expected_kinds[0].clone(),
+                                severity: "high".to_owned(),
+                                relative_file: evidence.file.clone(),
+                                start_line: evidence.start_line_min,
+                                end_line: evidence.start_line_min,
+                            }
                         })
                         .into_iter()
                         .collect();
@@ -1398,17 +1770,54 @@ mod tests {
         }
     }
 
-    fn verification(report: &DiagnosticReport, identity: &RunIdentity) -> Result<PromotionPermit> {
-        let mut bytes = serde_json::to_vec_pretty(report).unwrap();
-        bytes.push(b'\n');
-        let digest = diagnostic::sha256_hex(&bytes);
-        verify_promotion_bytes(
-            &bytes,
-            &digest,
-            identity,
-            &corpus::expected_calibration_ids(),
-        )
-        .map(|_| PromotionPermit(()))
+    fn reference_report(metrics: EvaluationMetrics) -> ReferenceReport {
+        let identity = identity();
+        ReferenceReport {
+            schema_version: 1,
+            generated_at: 1,
+            git_commit: "a".repeat(40),
+            model_id: identity.model_id,
+            endpoint_origin_fingerprint: identity.endpoint_origin_fingerprint,
+            request_profile: identity.request_profile,
+            request_profile_fingerprint: identity.request_profile_fingerprint,
+            review_strategy_id: identity.review_strategy_id,
+            prompt_version: identity.prompt_version,
+            prompt_hash: identity.prompt_hash,
+            response_schema_version: identity.response_schema_version,
+            response_schema_hash: identity.response_schema_hash,
+            analysis_epoch: identity.analysis_epoch,
+            corpus_manifest_hash: identity.corpus_manifest_hash,
+            oracle_hash: identity.oracle_hash,
+            corpus_content_hash: identity.corpus_content_hash,
+            analysis_contract_hash: identity.analysis_contract_hash,
+            metrics,
+            case_results: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn config_home_resolution_falls_back_from_empty_xdg_and_requires_absolute_roots() {
+        use std::ffi::OsStr;
+
+        assert_eq!(
+            config_home_from(Some(OsStr::new("")), Some(OsStr::new("/home/test"))).unwrap(),
+            Path::new("/home/test/.config")
+        );
+        assert_eq!(
+            config_home_from(
+                Some(OsStr::new("/etc/xdg-private")),
+                Some(OsStr::new("/home/test")),
+            )
+            .unwrap(),
+            Path::new("/etc/xdg-private")
+        );
+        for (xdg, home) in [
+            (Some(OsStr::new("relative")), Some(OsStr::new("/home/test"))),
+            (Some(OsStr::new("")), Some(OsStr::new("relative"))),
+            (Some(OsStr::new("/tmp/../escape")), None),
+        ] {
+            assert!(config_home_from(xdg, home).is_err());
+        }
     }
 
     #[test]
@@ -1493,8 +1902,30 @@ mod tests {
 
     #[test]
     fn every_promotion_mismatch_stops_before_the_provider_boundary() {
-        let expected_identity = identity();
-        let base = promotion_report(&expected_identity);
+        let workspace = corpus::workspace_root().unwrap();
+        let data = corpus::load_and_validate(&workspace).unwrap();
+        let expected_identity = promotion_identity(&data);
+        let base = promotion_report(&expected_identity, &data);
+        let missing_key_reads = Cell::new(0);
+        let missing_sends = Cell::new(0);
+        assert!(orchestrate_provider_boundaries(
+            RunKind::Qualification,
+            Some(&expected_identity),
+            &data,
+            None,
+            || {
+                missing_key_reads.set(missing_key_reads.get() + 1);
+                Ok(())
+            },
+            || {
+                missing_sends.set(missing_sends.get() + 1);
+                Ok(())
+            },
+        )
+        .is_err());
+        assert_eq!(missing_key_reads.get(), 0);
+        assert_eq!(missing_sends.get(), 0);
+
         let mut mismatches = Vec::new();
 
         let mut changed = base.clone();
@@ -1510,6 +1941,9 @@ mod tests {
         let mut changed = base.clone();
         changed.selected_case_ids.swap(0, 1);
         changed.case_results.swap(0, 1);
+        mismatches.push(changed);
+        let mut changed = base.clone();
+        changed.endpoint_origin_fingerprint = "ab".repeat(32);
         mismatches.push(changed);
         let mut changed = base.clone();
         changed.model_id.push_str("-different");
@@ -1567,10 +2001,50 @@ mod tests {
             diagnostic::analysis_contract_hash(&diagnostic::contract_identity(&changed));
         mismatches.push(changed);
         let mut changed = base.clone();
+        changed.corpus_content_hash = "dd".repeat(32);
+        changed.analysis_contract_hash =
+            diagnostic::analysis_contract_hash(&diagnostic::contract_identity(&changed));
+        mismatches.push(changed);
+        let mut changed = base.clone();
         changed.analysis_contract_hash = "99".repeat(32);
         mismatches.push(changed);
         let mut changed = base.clone();
         changed.failed_threshold_ids = vec![SEMANTIC_THRESHOLD_ID.to_owned()];
+        mismatches.push(changed);
+        let mut changed = base.clone();
+        changed.case_results[0].category = "injection".to_owned();
+        mismatches.push(changed);
+        let mut changed = base.clone();
+        changed.case_results[0]
+            .expected_kinds
+            .push("supply_chain_anomaly".to_owned());
+        mismatches.push(changed);
+        let mut changed = base.clone();
+        changed.case_results[0].accepted_findings[0].start_line = 2;
+        changed.case_results[0].accepted_findings[0].end_line = 2;
+        mismatches.push(changed);
+        let mut changed = base.clone();
+        let benign = changed
+            .case_results
+            .iter_mut()
+            .find(|case| case.category == "benign_snapshot")
+            .unwrap();
+        benign.expected_hit = true;
+        benign.expected_kinds = vec!["supply_chain_anomaly".to_owned()];
+        benign.accepted_findings = vec![DiagnosticFindingRef {
+            kind: "supply_chain_anomaly".to_owned(),
+            severity: "info".to_owned(),
+            relative_file: "PKGBUILD".to_owned(),
+            start_line: 1,
+            end_line: 1,
+        }];
+        changed.metrics.grounding_rate = 100.0;
+        mismatches.push(changed);
+        let mut changed = base.clone();
+        changed.case_results[0].status = DiagnosticStatus::Incomplete;
+        changed.metrics.completed_count -= 1;
+        changed.metrics.incomplete_count += 1;
+        changed.metrics.invalid_or_incomplete_rate = percentage(1, 17);
         mismatches.push(changed);
 
         for mutate_metrics in [
@@ -1581,7 +2055,15 @@ mod tests {
             },
             |metrics: &mut EvaluationMetrics| metrics.benign_unlabelled_advisory_rate = 10.1,
             |metrics: &mut EvaluationMetrics| metrics.llm_block_count = 1,
+            |metrics: &mut EvaluationMetrics| metrics.invalid_or_incomplete_rate = 1.0,
+            |metrics: &mut EvaluationMetrics| metrics.request_count += 1,
+            |metrics: &mut EvaluationMetrics| metrics.cache_hit_count += 1,
+            |metrics: &mut EvaluationMetrics| metrics.input_tokens = Some(1),
+            |metrics: &mut EvaluationMetrics| metrics.output_tokens = Some(1),
+            |metrics: &mut EvaluationMetrics| metrics.latency_ms += 1,
+            |metrics: &mut EvaluationMetrics| metrics.completed_count -= 1,
             |metrics: &mut EvaluationMetrics| metrics.unavailable_count = 1,
+            |metrics: &mut EvaluationMetrics| metrics.incomplete_count = 1,
         ] {
             let mut changed = base.clone();
             mutate_metrics(&mut changed.metrics);
@@ -1589,65 +2071,133 @@ mod tests {
         }
 
         for mismatch in mismatches {
-            let requests = Cell::new(0);
-            let result =
-                after_verified_promotion(verification(&mismatch, &expected_identity), || {
-                    requests.set(requests.get() + 1);
-                    Ok(())
-                });
-            assert!(result.is_err());
-            assert_eq!(requests.get(), 0);
+            let mut bytes = serde_json::to_vec_pretty(&mismatch).unwrap();
+            bytes.push(b'\n');
+            let digest = diagnostic::sha256_hex(&bytes);
+            assert_qualification_stops_before_boundaries(
+                &bytes,
+                &digest,
+                &expected_identity,
+                &data,
+            );
         }
 
-        let bytes = serde_json::to_vec_pretty(&base).unwrap();
-        let requests = Cell::new(0);
+        let mut bytes = serde_json::to_vec_pretty(&base).unwrap();
+        bytes.push(b'\n');
         let bad_digest = "00".repeat(32);
-        let result = after_verified_promotion(
-            verify_promotion_bytes(
-                &bytes,
-                &bad_digest,
-                &expected_identity,
-                &corpus::expected_calibration_ids(),
-            )
-            .map(|_| PromotionPermit(())),
-            || {
-                requests.set(1);
-                Ok(())
-            },
+        assert_qualification_stops_before_boundaries(
+            &bytes,
+            &bad_digest,
+            &expected_identity,
+            &data,
         );
-        assert!(result.is_err());
-        assert_eq!(requests.get(), 0);
 
-        let requests = Cell::new(0);
         let uppercase_digest = diagnostic::sha256_hex(&bytes).to_ascii_uppercase();
-        let result = after_verified_promotion(
-            verify_promotion_bytes(
-                &bytes,
-                &uppercase_digest,
-                &expected_identity,
-                &corpus::expected_calibration_ids(),
-            )
-            .map(|_| PromotionPermit(())),
+        assert_qualification_stops_before_boundaries(
+            &bytes,
+            &uppercase_digest,
+            &expected_identity,
+            &data,
+        );
+        assert_qualification_stops_before_boundaries(
+            b"not-json\n",
+            &diagnostic::sha256_hex(b"not-json\n"),
+            &expected_identity,
+            &data,
+        );
+
+        for mutate_identity in [
+            |identity: &mut RunIdentity| identity.corpus_manifest_hash = "de".repeat(32),
+            |identity: &mut RunIdentity| identity.oracle_hash = "ad".repeat(32),
+            |identity: &mut RunIdentity| identity.corpus_content_hash = "be".repeat(32),
+        ] {
+            let mut changed_identity = expected_identity.clone();
+            mutate_identity(&mut changed_identity);
+            let contract = AnalysisContractIdentity {
+                model_id: changed_identity.model_id.clone(),
+                request_profile: changed_identity.request_profile.clone(),
+                request_profile_fingerprint: changed_identity.request_profile_fingerprint.clone(),
+                prompt_version: changed_identity.prompt_version,
+                prompt_hash: changed_identity.prompt_hash.clone(),
+                response_schema_version: changed_identity.response_schema_version,
+                response_schema_hash: changed_identity.response_schema_hash.clone(),
+                analysis_epoch: changed_identity.analysis_epoch,
+                review_strategy_id: changed_identity.review_strategy_id.clone(),
+                corpus_manifest_hash: changed_identity.corpus_manifest_hash.clone(),
+                oracle_hash: changed_identity.oracle_hash.clone(),
+                corpus_content_hash: changed_identity.corpus_content_hash.clone(),
+            };
+            changed_identity.analysis_contract_hash = diagnostic::analysis_contract_hash(&contract);
+            let changed_report = promotion_report(&changed_identity, &data);
+            let mut changed_bytes = serde_json::to_vec_pretty(&changed_report).unwrap();
+            changed_bytes.push(b'\n');
+            assert_qualification_stops_before_boundaries(
+                &changed_bytes,
+                &diagnostic::sha256_hex(&changed_bytes),
+                &changed_identity,
+                &data,
+            );
+        }
+    }
+
+    fn assert_qualification_stops_before_boundaries(
+        bytes: &[u8],
+        digest: &str,
+        identity: &RunIdentity,
+        data: &CorpusData,
+    ) {
+        let key_reads = Cell::new(0);
+        let sends = Cell::new(0);
+        let result = orchestrate_provider_boundaries(
+            RunKind::Qualification,
+            Some(identity),
+            data,
+            Some(PromotionSource::Bytes { bytes, digest }),
             || {
-                requests.set(1);
+                key_reads.set(key_reads.get() + 1);
+                Ok(())
+            },
+            || {
+                sends.set(sends.get() + 1);
                 Ok(())
             },
         );
         assert!(result.is_err());
-        assert_eq!(requests.get(), 0);
+        assert_eq!(key_reads.get(), 0);
+        assert_eq!(sends.get(), 0);
     }
 
     #[test]
-    fn valid_promotion_crosses_provider_boundary_once() {
-        let identity = identity();
-        let report = promotion_report(&identity);
-        let requests = Cell::new(0);
-        after_verified_promotion(verification(&report, &identity), || {
-            requests.set(requests.get() + 1);
-            Ok(())
-        })
+    fn valid_promotion_crosses_key_and_provider_boundaries_once() {
+        let workspace = corpus::workspace_root().unwrap();
+        let data = corpus::load_and_validate(&workspace).unwrap();
+        let identity = promotion_identity(&data);
+        let report = promotion_report(&identity, &data);
+        let mut bytes = serde_json::to_vec_pretty(&report).unwrap();
+        bytes.push(b'\n');
+        let digest = diagnostic::sha256_hex(&bytes);
+        let key_reads = Cell::new(0);
+        let sends = Cell::new(0);
+        orchestrate_provider_boundaries(
+            RunKind::Qualification,
+            Some(&identity),
+            &data,
+            Some(PromotionSource::Bytes {
+                bytes: &bytes,
+                digest: &digest,
+            }),
+            || {
+                key_reads.set(key_reads.get() + 1);
+                Ok(())
+            },
+            || {
+                sends.set(sends.get() + 1);
+                Ok(())
+            },
+        )
         .unwrap();
-        assert_eq!(requests.get(), 1);
+        assert_eq!(key_reads.get(), 1);
+        assert_eq!(sends.get(), 1);
     }
 
     #[test]
@@ -1655,32 +2205,91 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("v1.json");
         fs::write(&output, b"existing-report\n").unwrap();
-        let mut cleanup = CandidateCleanup::for_output(&output).unwrap();
-        let identity = identity();
+        let mut cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
         let mut metrics = passing_metrics();
         metrics.semantic_expected_kind_rate = 0.0;
-        let report = ReferenceReport {
-            schema_version: 1,
-            generated_at: 1,
-            git_commit: "a".repeat(40),
-            model_id: identity.model_id,
-            endpoint_origin_fingerprint: identity.endpoint_origin_fingerprint,
-            request_profile: identity.request_profile,
-            request_profile_fingerprint: identity.request_profile_fingerprint,
-            review_strategy_id: identity.review_strategy_id,
-            prompt_version: identity.prompt_version,
-            prompt_hash: identity.prompt_hash,
-            response_schema_version: identity.response_schema_version,
-            response_schema_hash: identity.response_schema_hash,
-            analysis_epoch: identity.analysis_epoch,
-            corpus_manifest_hash: identity.corpus_manifest_hash,
-            oracle_hash: identity.oracle_hash,
-            analysis_contract_hash: identity.analysis_contract_hash,
-            metrics,
-            case_results: Vec::new(),
-        };
+        let report = reference_report(metrics);
         assert!(write_candidate_and_accept(&output, &report, &mut cleanup).is_err());
         assert_eq!(fs::read(&output).unwrap(), b"existing-report\n");
         assert!(!candidate_path(&output).unwrap().exists());
+    }
+
+    #[test]
+    fn missing_reference_report_directory_is_created_beneath_workspace() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("nested/reports/v1.json");
+        let cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
+        assert!(output.parent().unwrap().is_dir());
+        drop(cleanup);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_paths_reject_candidate_and_final_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let reports = temporary.path().join("reports");
+        fs::create_dir(&reports).unwrap();
+        let outside = temporary.path().join("outside.json");
+        fs::write(&outside, b"outside\n").unwrap();
+        let output = reports.join("v1.json");
+        let candidate = candidate_path(&output).unwrap();
+        symlink(&outside, &candidate).unwrap();
+        assert!(CandidateCleanup::for_output(temporary.path(), &output).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
+
+        fs::remove_file(&candidate).unwrap();
+        symlink(&outside, &output).unwrap();
+        assert!(CandidateCleanup::for_output(temporary.path(), &output).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_publication_rejects_a_final_symlink_swapped_after_preparation() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        fs::write(&output, b"existing\n").unwrap();
+        let mut cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
+        let outside = temporary.path().join("outside.json");
+        fs::write(&outside, b"outside\n").unwrap();
+        fs::remove_file(&output).unwrap();
+        symlink(&outside, &output).unwrap();
+
+        assert!(write_candidate_and_accept(
+            &output,
+            &reference_report(passing_metrics()),
+            &mut cleanup,
+        )
+        .is_err());
+        drop(cleanup);
+        assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
+        assert!(!candidate_path(&output).unwrap().exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_publication_is_anchored_when_parent_path_is_replaced() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let reports = temporary.path().join("reports");
+        fs::create_dir(&reports).unwrap();
+        let output = reports.join("v1.json");
+        fs::write(&output, b"existing\n").unwrap();
+        let mut cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
+        let retained = temporary.path().join("retained-reports");
+        fs::rename(&reports, &retained).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), &reports).unwrap();
+
+        let report = reference_report(passing_metrics());
+        write_candidate_and_accept(&output, &report, &mut cleanup).unwrap();
+
+        assert_ne!(fs::read(retained.join("v1.json")).unwrap(), b"existing\n");
+        assert!(!outside.path().join("v1.json").exists());
     }
 }
