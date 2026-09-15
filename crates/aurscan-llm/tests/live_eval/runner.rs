@@ -1401,7 +1401,8 @@ impl ReferencePublication {
             );
             Ok(())
         })();
-        let cleanup = unlink_reference_probe_if_owned(
+        // ReferencePublication retains the reference-directory lock through probe cleanup.
+        let cleanup = unlink_reference_probe_under_lock(
             &temporary.file,
             &self.directory,
             &probe_name,
@@ -1641,7 +1642,16 @@ fn random_reference_probe_name() -> Result<OsString> {
 }
 
 #[cfg(target_os = "linux")]
-fn unlink_reference_probe_if_owned(
+// Requires the caller to retain the reference-directory lock. Every process
+// touching this active probe entry must coordinate through that lock,
+// regardless of intent. Uncoordinated same-UID mutation of this exact entry
+// is outside the cleanup guarantee; unrelated files are not excluded.
+// A missing entry or different regular-file inode returns Ok(false);
+// symlink/nonregular entries fail without unlinking. This defensive identity
+// check is not atomic with pathname unlink and cannot protect against a
+// replacement between the check and unlink. Random names avoid ordinary
+// collisions; they are not an authorization boundary.
+fn unlink_reference_probe_under_lock(
     source: &File,
     destination_directory: &File,
     destination_name: &OsStr,
@@ -1658,7 +1668,7 @@ fn unlink_reference_probe_if_owned(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn unlink_reference_probe_if_owned(
+fn unlink_reference_probe_under_lock(
     _source: &File,
     _destination_directory: &File,
     _destination_name: &OsStr,
@@ -2646,6 +2656,134 @@ max_requests_per_run = 100
                 .map(|entry| entry.unwrap().file_name())
                 .collect::<Vec<_>>(),
             [OsString::from("unrelated")]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_probe_lock_is_released_after_owner_drops() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        let first = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        assert!(ReferencePublication::for_output(temporary.path(), &output).is_err());
+        drop(first);
+        let next = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        next.preflight().unwrap();
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_probe_cleanup_preserves_preexisting_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        let source = PathlessReferenceTemporary::create(&publication.directory).unwrap();
+        let name = OsStr::new(".aurscan-reference-probe-replaced");
+        link_retained_reference_noclobber(&source.file, &publication.directory, name).unwrap();
+        let path = reference_child_path(&publication.directory, &publication.directory_path, name);
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"replacement must survive\n").unwrap();
+        let replacement = File::open(&path).unwrap();
+        assert_ne!(
+            file_identity(&source.file).unwrap(),
+            file_identity(&replacement).unwrap()
+        );
+        assert!(!unlink_reference_probe_under_lock(
+            &source.file,
+            &publication.directory,
+            name,
+            &path,
+        )
+        .unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"replacement must survive\n");
+        assert_eq!(
+            file_identity(&File::open(&path).unwrap()).unwrap(),
+            file_identity(&replacement).unwrap()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_probe_cleanup_reports_missing_entry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        let source = PathlessReferenceTemporary::create(&publication.directory).unwrap();
+        let name = OsStr::new(".aurscan-reference-probe-missing");
+        let path = reference_child_path(&publication.directory, &publication.directory_path, name);
+        assert!(!unlink_reference_probe_under_lock(
+            &source.file,
+            &publication.directory,
+            name,
+            &path,
+        )
+        .unwrap());
+        assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_probe_cleanup_rejects_symlink_and_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        let source = PathlessReferenceTemporary::create(&publication.directory).unwrap();
+        let target = temporary.path().join("unrelated");
+        fs::write(&target, b"keep\n").unwrap();
+        let name = OsStr::new(".aurscan-reference-probe-nonregular");
+        let path = reference_child_path(&publication.directory, &publication.directory_path, name);
+        symlink(&target, &path).unwrap();
+        assert!(unlink_reference_probe_under_lock(
+            &source.file,
+            &publication.directory,
+            name,
+            &path,
+        )
+        .is_err());
+        assert!(fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&target).unwrap(), b"keep\n");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(unlink_reference_probe_under_lock(
+            &source.file,
+            &publication.directory,
+            name,
+            &path,
+        )
+        .is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().is_dir());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_preflight_preserves_stale_probe() {
+        let temporary = tempfile::tempdir().unwrap();
+        let name = ".aurscan-reference-probe-00000000000000000000000000000000";
+        let stale = temporary.path().join(name);
+        fs::write(&stale, b"stale sentinel must survive\n").unwrap();
+        let retained = File::open(&stale).unwrap();
+        let identity = file_identity(&retained).unwrap();
+        let output = temporary.path().join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        publication.preflight().unwrap();
+        assert_eq!(fs::read(&stale).unwrap(), b"stale sentinel must survive\n");
+        assert_eq!(
+            file_identity(&File::open(&stale).unwrap()).unwrap(),
+            identity
+        );
+        assert!(!output.exists());
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            [OsString::from(name)]
         );
     }
 

@@ -3,8 +3,8 @@
 **Last updated:** 2026-09-15  
 **Repository:** `aur_package_scanner`  
 **Branch:** `feat/add-llm-integration`  
-**Functional/docs HEAD before this handoff file:** `ef538d33bbb47bca4c156c64222c5237026f823c`  
-**Remote:** `origin/feat/add-llm-integration` is synchronized
+**Implementation base:** `b91cf321c2edc5fb1e0f6af5dca675c31763b1bc`\
+**Review/publication:** cooperative cleanup amendment awaits fresh independent acceptance and publication
 
 ## Start Here
 
@@ -13,9 +13,12 @@ In a new Pi session:
 ```text
 Read AGENTS.md and HANDOFF.md completely. Run `arc prime` using the new
 session's own session ID. Do not run any provider-backed calibration or
-qualification. Inspect Arc task aurscan-0qag.01vn62.1.9.3 and approved plan
-plan.04ynkn, then use /arc-brainstorm to resolve the capability-probe cleanup
-threat model before changing the promotion harness.
+qualification. Read the Current Execution Amendment in Arc task
+aurscan-0qag.01vn62.1.9.3 and approved plan.056dgb in permanent parent design
+aurscan-0qag.01vn62.1.9. The two-file implementation is ready for fresh
+independent specification, code, and adversarial review under the approved
+cooperative cleanup boundary. Check actual review and publication evidence
+before closing the foundation task.
 ```
 
 Useful commands:
@@ -26,6 +29,7 @@ git log -12 --oneline
 arc show aurscan-0qag.01vn62.1.9.3
 arc show aurscan-0qag.01vn62.1.9
 arc plan show plan.04ynkn
+arc plan show plan.056dgb
 arc blocked
 ```
 
@@ -33,9 +37,11 @@ Do not copy the previous session ID into a new worker. Let the new harness provi
 
 ## Current Outcome
 
-The client-only experimental LLM integration is implemented through CLI E2E coverage and user documentation, but the new semantic-promotion foundation is **not acceptance-complete**. One filesystem race remains in a pre-provider capability probe.
+The client-only experimental LLM integration is implemented through CLI E2E coverage and user documentation. The approved `plan.056dgb` cooperative cleanup amendment is implemented in `runner.rs` and this handoff, but the semantic-promotion foundation is **awaiting independent implementation acceptance**.
 
-The branch is clean, committed, pushed, and synchronized. No provider-backed calibration or qualification was run in this session, and no accepted reference report exists.
+The probe's identity check and pathname unlink remain separate. Every same-account process touching the active probe entry must coordinate through the retained directory lock, regardless of intent. Accidental and deliberate uncoordinated mutation of that exact entry is outside the cleanup guarantee; unrelated files and all other safeguards remain covered.
+
+The five new offline regressions cover lock release/reacquisition, a regular-file replacement installed before validation, missing entries, symlink/directory rejection, and stale-probe preservation. Fresh implementation review and publication remain pending. No provider-backed calibration or qualification was run in this session, and no accepted reference report exists.
 
 ## Non-Negotiable Product Contracts
 
@@ -52,12 +58,15 @@ The branch is clean, committed, pushed, and synchronized. No provider-backed cal
 
 ## Approved Design
 
-- **Planner ID:** `plan.04ynkn`
+- **Original planner ID:** `plan.04ynkn`
+- **Approved cleanup amendment:** `plan.056dgb`, approved 2026-09-15
 - **Local file:** `docs/plans/2026-09-14-llm-semantic-calibration-remediation.md`
 - **Status:** approved
 - **Permanent Arc record:** remediation epic `aurscan-0qag.01vn62.1.9`
 
 The local plan file exists but is ignored by the user's global Git ignore rule (`docs/plans/*`). The complete approved design and all subsequent execution amendments are preserved in the Arc epic/task descriptions.
+
+The foundation task's **Current Execution Amendment** is the current two-file implementation contract. Earlier broad file lists and redesign-stop instructions remain history; the owner authorized this implementation after the cleanup design was approved. Design and planning critiques do not constitute implementation acceptance.
 
 The approved sequence is:
 
@@ -72,13 +81,13 @@ The approved sequence is:
 | Arc ID | Status | Purpose | Blocking relationship |
 |---|---|---|---|
 | `aurscan-0qag.01vn62.1.9` | open | Remediation epic | Keep open while foundation/T4 remain unresolved |
-| `aurscan-0qag.01vn62.1.9.3` | **blocked**, `high-risk` | Correct oracle and land modular promotion harness | Blocks `.1.9.4` |
+| `aurscan-0qag.01vn62.1.9.3` | **in progress; independent acceptance pending**, `high-risk` | Correct oracle and land modular promotion harness | Blocks `.1.9.4` |
 | `aurscan-0qag.01vn62.1.9.4` | open, `devops` | One paid 17-case promotion preflight | Depends on `.1.9.3`; do not run |
 | `aurscan-0qag.01vn62.1.5` | blocked, `devops` | One conditional 57-case qualification and accepted report | Depends on `.1.9.4`; do not run |
 | `aurscan-0qag.01vn62.1.7` | **closed**, `docs-only` | Experimental LLM usage documentation | Completed at `ef538d3` |
 | `aurscan-0qag.01vn62.1.9.5` | open, `docs-only` | Accepted reference-metrics addendum | Depends on T4 and docs; do not write yet |
 
-## Completed in the Latest Session
+## Implementation History
 
 ### Planning and decomposition
 
@@ -89,7 +98,7 @@ The approved sequence is:
 
 ### Oracle and promotion harness implementation
 
-The following implementation is committed and pushed, but task `.1.9.3` remains blocked by the final review finding below:
+The following prior implementation is committed and pushed. Its final cleanup review finding led to approved `plan.056dgb`; task `.1.9.3` still requires fresh acceptance of the current amendment:
 
 - `f87bc57` — modular live harness, schema-v2 corpus, guarded fixtures, diagnostics, promotion binding
 - `986be34` — empty `XDG_STATE_HOME` fallback
@@ -125,36 +134,46 @@ The docs cover direct OpenAI and generic OpenAI-compatible/OpenRouter configurat
 
 ## Exact Remaining Blocker
 
-Strict final specification review rejected task `.1.9.3` at `9fc0cef` for one remaining issue:
+Fresh independent specification, code, and isolated adversarial acceptance of the current two-file amendment, followed by publication, remain required before `.1.9.3` can close.
+
+Historically, strict final specification review rejected task `.1.9.3` at `9fc0cef` for this issue:
 
 > The `O_TMPFILE` capability probe links its retained FD to a random probe filename, checks that filename's inode, and then performs a separate pathname-based `unlinkat`. A non-cooperating same-UID writer can replace the entry between the check and unlink, causing cleanup to delete an entry the harness no longer owns.
 
 Relevant implementation is in:
 
 - `crates/aurscan-llm/tests/live_eval/runner.rs`
-  - `unlink_reference_probe_if_owned`
+  - `unlink_reference_probe_under_lock`
   - capability-probe creation/cleanup and tests near that helper
 
-The current regression proves unrelated files survive, but it does not replace the exact probe path between ownership validation and unlink.
+The new replacement regression installs a different regular-file inode before ownership validation and retains both original and replacement FDs through the assertions. It proves that detectable replacement survives. It does not exercise or claim protection against replacement between validation and unlink.
 
-The accepted-report publication itself is pathless and no-clobber. The unresolved race is specifically cleanup of the temporary **capability probe final** before any provider access.
+Accepted-report publication remains pathless and no-clobber. The non-atomic check/unlink limitation applies specifically to cleanup of the temporary **capability probe final** before provider access and is addressed by the approved coordination boundary below.
 
 ### Why implementation stopped
 
-Multiple review cycles reached the explicit circuit breaker. The owner authorized one final simplification and directed that any further fix-required result stop for redesign. The task was therefore marked blocked and no additional code change was attempted.
+Multiple review cycles reached the explicit circuit breaker, so implementation stopped for redesign. The owner then approved `plan.056dgb`, the stored task/design were amended, and the owner explicitly authorized this two-file implementation. Further out-of-scope protocol changes require another design decision.
 
-### Design decision required
+### Approved design decision
 
-Use `/arc-brainstorm`; do not silently choose. The core question is whether a non-cooperating process running as the same Unix UID is inside the capability-probe cleanup threat model.
+`plan.056dgb` selects cooperative cleanup. All processes touching the active random probe entry must hold the retained reference-directory lock, regardless of intent. Uncoordinated same-UID mutation of that exact entry, whether accidental or deliberate, is outside this guarantee. Sync, editor, or cleanup tools unable to participate must be kept from touching active probe entries while the harness runs. Random names avoid ordinary collisions and are not an authorization boundary.
 
-Possible directions to evaluate:
+The helper was renamed in both platform variants and its caller, with an explicit retained-lock contract. Its function body and error propagation are unchanged. Missing or different regular-file entries return `Ok(false)`; symlink/nonregular entries fail without unlinking. Identity validation is defensive and is not atomic with unlink.
 
-1. **Cooperative same-UID boundary:** treat the retained directory lock plus random probe name as sufficient for local test harness operations, explicitly excluding malicious same-UID mutation.
-2. **Weaker preflight:** prove descriptor-relative `O_TMPFILE` creation before provider access but allow the final retained-FD link operation itself to fail closed after a paid run.
-3. **Persistent capability marker:** avoid cleanup races by retaining an explicitly managed marker, while addressing repository cleanliness and provenance.
-4. **Different kernel isolation:** find a practical unprivileged Linux mechanism that exercises the exact target filesystem/link operation without requiring pathname cleanup.
+The exact pre-provider `O_TMPFILE`-to-link capability probe, retained directory FD/lock, descriptor-relative cleanup, directory sync, and fail-closed errors remain. Final publication still links the exact retained report inode only if `v1.json` is absent and never overwrites or cleans up `v1.json`. Existing confinement, symlink/FIFO rejection, promotion validation, diagnostic secrecy, and zero-key/zero-provider failure checks remain required.
 
-Do not resume implementation until one option is approved and the Arc task/design is amended.
+### Stale capability probes
+
+An interrupted preflight can leave a `.aurscan-reference-probe-*` entry.
+Later preflights leave stale entries untouched and may proceed using a fresh
+probe, subject to all existing checks. A stale entry is not an accepted report
+or evidence that a new preflight passed.
+
+Cleanup is manual while harness runs and other processes that could mutate
+the relevant entry are stopped. Inspect the exact path and remove only a
+confirmed disposable artifact. A matching name or fixed probe contents alone
+does not prove ownership. Do not use wildcard deletion or remove `v1.json`.
+This recovery procedure does not authorize another paid run.
 
 ## Provider and Evaluation Safety
 
@@ -171,31 +190,26 @@ The intended candidate remains revision-pinned `gpt-5.6-sol` with `request_profi
 
 ## Last Fresh Quality Evidence
 
-At current code/docs state:
+Current implementation evidence is based on `b91cf321c2edc5fb1e0f6af5dca675c31763b1bc`, with `runner.rs` SHA-256 `c3a148cbbc89736876a84c2a1a9bef0be412bc29040a3240eff170a8f28a2495`. Full gate logs and per-gate revision/content identities are retained in `/tmp/arc-build-context.6_ijyp0q/aurscan-0qag.01vn62.1.9.3/builder-logs/`.
+
+The RED step failed compilation because the new helper name was not yet defined. The helper rename and contract comment made the focused suite pass; no behavior failure was manufactured for existing behavior.
+
+Current gate state:
 
 ```text
+cargo test --locked -p aurscan-llm --test live_eval     PASS: 55 passed, 2 ignored
 cargo fmt --check                                      PASS
 cargo clippy --locked --workspace --all-targets -- -D warnings
                                                        PASS
-cargo test --locked --workspace                        PASS
+cargo test --locked --workspace                        PASS: 411 passed, 3 ignored
 cargo build --locked --workspace                       PASS
 ```
 
-Latest workspace test total after the pathless simplification:
+The initial sandboxed workspace run stopped when two unchanged CLI tests could not bind temporary Unix sockets (`PermissionDenied`). The same required suite passed after approved execution outside the sandbox. Both attempts are retained in `gate-workspace-tests.log` and `gate-workspace-tests-unsandboxed.log`; no code change was needed.
 
-```text
-405 passed, 3 intentionally ignored
-```
+Both live evaluation tests remain explicitly ignored, as does the existing source-writing snapshot recorder. No live-provider access or fixture execution occurred during these gates; workspace transport tests use local mock servers. Independent implementation reviews remain pending. Subsequent handoff-only evidence updates do not alter the tested Rust source hash above.
 
-Latest focused live harness result:
-
-```text
-50 passed, 2 explicitly ignored live tests
-```
-
-No provider/network access or fixture execution occurred during those gates.
-
-Recommended verification after any approved redesign:
+Required offline verification commands:
 
 ```bash
 cargo test --locked -p aurscan-llm --test live_eval
@@ -211,7 +225,7 @@ Then run fresh Arc spec review, code review, and isolated adversarial evaluation
 
 ## Repository Hygiene
 
-At handoff creation:
+Prior handoff recorded:
 
 - Feature worktree is clean and synchronized with origin.
 - Only the main worktree and this feature worktree remain.
@@ -229,9 +243,8 @@ Do not drop these stashes without explicit owner authorization.
 
 1. Read this file and `AGENTS.md`.
 2. Run `arc prime` with the new session identity.
-3. Confirm branch/upstream cleanliness.
-4. Inspect `.1.9.3`, its final blocker, and `plan.04ynkn`.
-5. Invoke `/arc-brainstorm` for the capability-probe cleanup threat-model decision.
-6. Register and approve any design amendment before implementation.
-7. If implementation is authorized, keep it limited to the approved harness files and run only offline tests.
-8. Do not progress to `.1.9.4` until `.1.9.3` has fresh independent acceptance and is formally closed.
+3. Confirm actual branch/upstream state and preserve unrelated work and existing stashes.
+4. Read `.1.9.3`'s Current Execution Amendment and permanent parent design, including approved `plan.056dgb`.
+5. Review the two-file implementation and its revision-bound offline evidence; obtain fresh independent specification, code, and isolated adversarial acceptance under the stated cooperative boundary.
+6. If acceptance passes, publish and verify the reviewed commit, record actual evidence, and close only the foundation task. Keep it unaccepted if any required review fails; do not widen the exclusion to waive findings.
+7. Do not progress to `.1.9.4` until `.1.9.3` has fresh independent acceptance and is formally closed. Operational work retains its separate configuration, consent, and authorization gates.
