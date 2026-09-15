@@ -574,10 +574,11 @@ fn open_directory_nofollow(path: &Path) -> std::io::Result<File> {
 
 #[cfg(target_os = "linux")]
 fn open_regular_file_nofollow(path: &Path) -> Result<File> {
+    const O_NONBLOCK: i32 = 0o4000;
     const O_NOFOLLOW: i32 = 0o400000;
     OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
         .open(path)
         .with_context(|| format!("cannot securely open file {}", path.display()))
 }

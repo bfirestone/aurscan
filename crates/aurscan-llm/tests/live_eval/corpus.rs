@@ -959,10 +959,7 @@ fn validate_no_literal_network_destination(case_id: &str, file: &str, content: &
 }
 
 fn validate_variable_names(case_id: &str, file: &str, content: &str) -> Result<()> {
-    let finding_labels = EXPECTED_KIND_SETS
-        .iter()
-        .flat_map(|(_, kinds)| kinds.iter().copied())
-        .collect::<BTreeSet<_>>();
+    let finding_labels = LlmFindingKind::ALL.map(kind_name);
     for name in shell_variable_names(content) {
         let lowercase = name.to_ascii_lowercase();
         ensure!(
@@ -989,34 +986,67 @@ fn shell_variable_names(content: &str) -> BTreeSet<&str> {
                 start += 1;
             }
             let mut end = start;
-            while bytes
-                .get(end)
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-            {
+            while bytes.get(end).is_some_and(|byte| is_shell_name_byte(*byte)) {
                 end += 1;
             }
             if end > start {
                 names.insert(&content[start..end]);
             }
             index = end;
-        } else {
-            index += 1;
+            continue;
         }
-    }
-    for line in content.lines() {
-        let candidate = line.trim().strip_prefix("local ").unwrap_or(line.trim());
-        if let Some((name, _)) = candidate.split_once('=') {
-            let name = name.trim();
-            if !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+
+        if is_shell_name_start(bytes[index])
+            && (index == 0 || !is_shell_name_byte(bytes[index - 1]))
+        {
+            let start = index;
+            index += 1;
+            while bytes
+                .get(index)
+                .is_some_and(|byte| is_shell_name_byte(*byte))
             {
-                names.insert(name);
+                index += 1;
+            }
+            let is_assignment = bytes.get(index) == Some(&b'=')
+                || (bytes.get(index) == Some(&b'+') && bytes.get(index + 1) == Some(&b'='));
+            if is_assignment {
+                names.insert(&content[start..index]);
+            }
+            continue;
+        }
+        index += 1;
+    }
+
+    for command in content.split(['\n', ';', '|', '&', '(', ')', '{', '}']) {
+        let mut words = command.trim_start().split_ascii_whitespace();
+        let Some(declaration) = words.next() else {
+            continue;
+        };
+        if !["local", "declare", "typeset", "readonly", "export"].contains(&declaration) {
+            continue;
+        }
+        for word in words {
+            if word.starts_with('-') {
+                continue;
+            }
+            let name_len = word
+                .bytes()
+                .take_while(|byte| is_shell_name_byte(*byte))
+                .count();
+            if name_len > 0 && is_shell_name_start(word.as_bytes()[0]) {
+                names.insert(&word[..name_len]);
             }
         }
     }
     names
+}
+
+fn is_shell_name_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'_'
+}
+
+fn is_shell_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn validate_download_pair_behavior(bundles: &BTreeMap<&str, RecipeBundle>) -> Result<()> {
@@ -1497,14 +1527,35 @@ mod tests {
     }
 
     #[test]
-    fn variable_names_reject_finding_kind_labels_as_substrings() {
-        for variable in [
-            "my_download_execute_marker",
-            "prefix_credential_access",
-            "other_semantic_suffix",
-        ] {
-            let content = format!("local {variable}=value\n");
-            assert!(validate_variable_names("case", "PKGBUILD", &content).is_err());
+    fn direct_assignments_reject_every_finding_kind_as_a_substring() {
+        for kind in LlmFindingKind::ALL {
+            let variable = format!("prefix_{}_suffix", kind_name(kind));
+            let content = format!("{variable}=value\n");
+            assert!(
+                validate_variable_names("case", "PKGBUILD", &content).is_err(),
+                "accepted direct assignment {variable}"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_variable_definitions_and_assignments_are_all_scanned() {
+        for kind in LlmFindingKind::ALL {
+            let variable = format!("prefix_{}_suffix", kind_name(kind));
+            for content in [
+                format!("export {variable}=value\n"),
+                format!("readonly {variable}=value\n"),
+                format!("declare -r {variable}=value\n"),
+                format!("typeset {variable}\n"),
+                format!(":; typeset {variable}\n"),
+                format!("local safe=value {variable}=value\n"),
+                format!("{variable}+=value\n"),
+            ] {
+                assert!(
+                    validate_variable_names("case", "PKGBUILD", &content).is_err(),
+                    "accepted shell variable definition or assignment {content:?}"
+                );
+            }
         }
     }
 

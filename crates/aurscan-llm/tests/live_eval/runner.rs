@@ -103,7 +103,15 @@ struct PromotionPermit(());
 
 enum PromotionSource<'a> {
     Configured,
-    Bytes { bytes: &'a [u8], digest: &'a str },
+    Bytes {
+        bytes: &'a [u8],
+        digest: &'a str,
+    },
+    Path {
+        state_home: &'a Path,
+        path: &'a Path,
+        digest: &'a str,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -200,9 +208,9 @@ fn run_live_evaluation(run_kind: RunKind) -> Result<()> {
     } else {
         None
     };
-    let mut candidate_cleanup = reference_output
+    let reference_publication = reference_output
         .as_deref()
-        .map(|output| CandidateCleanup::for_output(&workspace, output))
+        .map(|output| ReferencePublication::for_output(&workspace, output))
         .transpose()?;
 
     let validated =
@@ -272,7 +280,7 @@ fn run_live_evaluation(run_kind: RunKind) -> Result<()> {
             run_kind,
             diagnostic_output,
             reference_output.as_deref(),
-            candidate_cleanup.as_mut(),
+            reference_publication.as_ref(),
             selected_case_ids,
             run_identity,
             results,
@@ -281,6 +289,7 @@ fn run_live_evaluation(run_kind: RunKind) -> Result<()> {
 
     orchestrate_provider_boundaries(
         run_kind,
+        reference_publication.as_ref(),
         promotion_identity.as_ref(),
         &data,
         (run_kind == RunKind::Qualification).then_some(PromotionSource::Configured),
@@ -650,7 +659,7 @@ fn finalize_run(
     run_kind: RunKind,
     diagnostic_output: PreparedDiagnosticPath,
     reference_output: Option<&Path>,
-    candidate_cleanup: Option<&mut CandidateCleanup>,
+    reference_publication: Option<&ReferencePublication>,
     selected_case_ids: Vec<String>,
     identity: RunIdentity,
     results: EvaluationResults,
@@ -697,7 +706,7 @@ fn finalize_run(
     }
     if run_kind == RunKind::Calibration {
         ensure!(
-            reference_output.is_none() && candidate_cleanup.is_none(),
+            reference_output.is_none() && reference_publication.is_none(),
             "calibration acquired reference-publication state"
         );
         return Ok(());
@@ -705,8 +714,12 @@ fn finalize_run(
 
     let output = reference_output
         .ok_or_else(|| anyhow!("qualification reference output is not configured"))?;
-    let cleanup =
-        candidate_cleanup.ok_or_else(|| anyhow!("qualification candidate cleanup is not armed"))?;
+    let publication = reference_publication
+        .ok_or_else(|| anyhow!("qualification reference publication is not armed"))?;
+    ensure!(
+        publication.output_path == output,
+        "qualification reference output path changed"
+    );
     let reference = ReferenceReport {
         schema_version: 1,
         generated_at,
@@ -728,7 +741,7 @@ fn finalize_run(
         metrics: results.metrics,
         case_results: results.reference_cases,
     };
-    write_candidate_and_accept(output, &reference, cleanup)
+    write_reference_first(&reference, publication)
 }
 
 fn build_run_identity(
@@ -782,13 +795,33 @@ fn load_and_verify_promotion(identity: &RunIdentity, data: &CorpusData) -> Resul
     let configured_sha = env::var(PROMOTION_SHA256_ENV).map_err(|_| {
         anyhow!("{PROMOTION_SHA256_ENV} must contain the recorded lowercase SHA-256")
     })?;
+    load_and_verify_opened_promotion(&mut opened, &configured_sha, identity, data)
+}
+
+fn load_and_verify_promotion_path(
+    state_home: &Path,
+    path: &Path,
+    configured_sha: &str,
+    identity: &RunIdentity,
+    data: &CorpusData,
+) -> Result<PromotionPermit> {
+    let mut opened = diagnostic::open_existing_diagnostic_path(state_home, path)?;
+    load_and_verify_opened_promotion(&mut opened, configured_sha, identity, data)
+}
+
+fn load_and_verify_opened_promotion(
+    opened: &mut diagnostic::OpenedDiagnosticPath,
+    configured_sha: &str,
+    identity: &RunIdentity,
+    data: &CorpusData,
+) -> Result<PromotionPermit> {
     let bytes = opened.read_bytes().with_context(|| {
         format!(
             "cannot read promotion diagnostic {}",
             opened.path().display()
         )
     })?;
-    verify_promotion_bytes(&bytes, &configured_sha, identity, data)?;
+    verify_promotion_bytes(&bytes, configured_sha, identity, data)?;
     Ok(PromotionPermit(()))
 }
 
@@ -1081,6 +1114,7 @@ fn percentage_matches(actual: f64, numerator: usize, denominator: usize) -> bool
 
 fn orchestrate_provider_boundaries<T>(
     run_kind: RunKind,
+    reference_publication: Option<&ReferencePublication>,
     promotion_identity: Option<&RunIdentity>,
     data: &CorpusData,
     promotion_source: Option<PromotionSource<'_>>,
@@ -1089,10 +1123,15 @@ fn orchestrate_provider_boundaries<T>(
 ) -> Result<T> {
     match run_kind {
         RunKind::Calibration => ensure!(
-            promotion_identity.is_none() && promotion_source.is_none(),
-            "calibration unexpectedly acquired promotion state"
+            reference_publication.is_none()
+                && promotion_identity.is_none()
+                && promotion_source.is_none(),
+            "calibration unexpectedly acquired promotion or reference state"
         ),
         RunKind::Qualification => {
+            reference_publication
+                .ok_or_else(|| anyhow!("qualification reference publication is missing"))?
+                .preflight()?;
             let identity = promotion_identity
                 .ok_or_else(|| anyhow!("qualification promotion identity is missing"))?;
             let source = promotion_source
@@ -1103,6 +1142,11 @@ fn orchestrate_provider_boundaries<T>(
                     verify_promotion_bytes(bytes, digest, identity, data)?;
                     PromotionPermit(())
                 }
+                PromotionSource::Path {
+                    state_home,
+                    path,
+                    digest,
+                } => load_and_verify_promotion_path(state_home, path, digest, identity, data)?,
             };
         }
     }
@@ -1268,23 +1312,14 @@ struct FileIdentity {
     length: u64,
 }
 
-#[derive(Debug)]
-struct OwnedCandidate {
-    file: File,
-    identity: FileIdentity,
-}
-
-struct CandidateCleanup {
+struct ReferencePublication {
     output_path: PathBuf,
     directory_path: PathBuf,
     directory: File,
     output_name: OsString,
-    candidate_name: OsString,
-    existing_output: Option<File>,
-    owned_candidate: Option<OwnedCandidate>,
 }
 
-impl CandidateCleanup {
+impl ReferencePublication {
     fn for_output(workspace: &Path, output: &Path) -> Result<Self> {
         let canonical_workspace = workspace
             .canonicalize()
@@ -1304,146 +1339,91 @@ impl CandidateCleanup {
             .file_name()
             .ok_or_else(|| anyhow!("reference report path has no file name"))?
             .to_os_string();
-        let candidate_name = candidate_path(output)?
-            .file_name()
-            .ok_or_else(|| anyhow!("reference candidate path has no file name"))?
-            .to_os_string();
-        let candidate = reference_child_path(&directory, directory_path, &candidate_name);
-        ensure!(
-            fs::symlink_metadata(&candidate)
-                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
-            "reference report candidate already exists or cannot be inspected"
-        );
-        let final_path = reference_child_path(&directory, directory_path, &output_name);
-        let existing_output = open_optional_reference_file(&final_path)?;
         Ok(Self {
             output_path: output.to_path_buf(),
             directory_path: directory_path.to_path_buf(),
             directory,
             output_name,
-            candidate_name,
-            existing_output,
-            owned_candidate: None,
         })
-    }
-
-    fn candidate(&self) -> PathBuf {
-        reference_child_path(&self.directory, &self.directory_path, &self.candidate_name)
     }
 
     fn output(&self) -> PathBuf {
         reference_child_path(&self.directory, &self.directory_path, &self.output_name)
     }
 
-    fn create_owned_candidate(&mut self) -> Result<()> {
-        ensure!(
-            self.owned_candidate.is_none(),
-            "reference candidate is already owned"
-        );
-        let file = create_reference_candidate(&self.candidate())?;
-        let identity = file_identity(&file).context("cannot identify owned reference candidate")?;
-        self.owned_candidate = Some(OwnedCandidate { file, identity });
-        Ok(())
+    fn temporary_directory(&self) -> PathBuf {
+        reference_directory_path(&self.directory, &self.directory_path)
     }
 
-    fn owned_candidate_mut(&mut self) -> Option<&mut File> {
-        self.owned_candidate
-            .as_mut()
-            .map(|candidate| &mut candidate.file)
-    }
-
-    fn candidate_entry_is_owned(&self) -> Result<bool> {
-        let Some(owned) = &self.owned_candidate else {
-            return Ok(false);
-        };
-        ensure!(
-            file_identity(&owned.file)? == owned.identity,
-            "owned reference candidate identity changed"
-        );
-        let Some(current) = open_optional_reference_file(&self.candidate())? else {
-            return Ok(false);
-        };
-        Ok(file_identity(&current)? == owned.identity)
-    }
-
-    fn ensure_candidate_entry_is_owned(&self) -> Result<()> {
-        ensure!(
-            self.candidate_entry_is_owned()?,
-            "reference candidate directory entry no longer matches the owned file"
-        );
-        Ok(())
-    }
-
-    fn remove_owned_candidate(&mut self) -> Result<()> {
-        self.ensure_candidate_entry_is_owned()?;
-        fs::remove_file(self.candidate()).context("cannot remove owned reference candidate")?;
-        self.owned_candidate = None;
-        Ok(())
-    }
-
-    fn ensure_output_entry_is_owned(&self) -> Result<()> {
-        let owned = self
-            .owned_candidate
-            .as_ref()
-            .ok_or_else(|| anyhow!("reference candidate ownership is not armed"))?;
-        let current = open_optional_reference_file(&self.output())?
-            .ok_or_else(|| anyhow!("accepted reference report is missing"))?;
-        ensure!(
-            file_identity(&current)? == owned.identity,
-            "accepted reference report does not match the owned candidate"
-        );
-        Ok(())
-    }
-
-    fn disarm(&mut self) {
-        self.owned_candidate = None;
-    }
-}
-
-impl Drop for CandidateCleanup {
-    fn drop(&mut self) {
-        if self.owned_candidate.is_none() {
-            return;
-        }
-        match self.candidate_entry_is_owned() {
-            Ok(true) => match fs::remove_file(self.candidate()) {
-                Ok(()) => self.owned_candidate = None,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    self.owned_candidate = None;
-                }
-                Err(error) => eprintln!(
-                    "failed to clean owned reference candidate {}: {}",
-                    diagnostic::terminal_escape(&candidate_path(&self.output_path).map_or_else(
-                        |_| "<invalid-candidate>".into(),
-                        |path| path.to_string_lossy().into_owned()
-                    )),
-                    diagnostic::terminal_escape(&error.to_string())
-                ),
-            },
-            Ok(false) => {
-                self.owned_candidate = None;
-            }
-            Err(error) => eprintln!(
-                "failed to verify owned reference candidate {}: {}",
-                diagnostic::terminal_escape(&candidate_path(&self.output_path).map_or_else(
-                    |_| "<invalid-candidate>".into(),
-                    |path| path.to_string_lossy().into_owned()
-                )),
-                diagnostic::terminal_escape(&error.to_string())
-            ),
+    fn ensure_vacant(&self) -> Result<()> {
+        match fs::symlink_metadata(self.output()) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Ok(_) => bail!("accepted reference report already exists"),
+            Err(error) => Err(error).context("cannot inspect accepted reference report"),
         }
     }
-}
 
-fn candidate_path(output: &Path) -> Result<PathBuf> {
-    let directory = output
-        .parent()
-        .ok_or_else(|| anyhow!("reference report path has no parent directory"))?;
-    let file_name = output
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow!("reference report path has no UTF-8 file name"))?;
-    Ok(directory.join(format!("{file_name}.candidate")))
+    fn preflight(&self) -> Result<()> {
+        self.ensure_vacant()?;
+        self.probe_fd_linkat_support()?;
+        self.ensure_vacant()
+    }
+
+    fn random_unused_path(&self, prefix: &str) -> Result<(PathBuf, OsString)> {
+        let placeholder = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempfile_in(self.temporary_directory())
+            .context("cannot reserve random same-directory reference pathname")?;
+        let path = placeholder.path().to_path_buf();
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow!("random reference path has no file name"))?
+            .to_os_string();
+        placeholder
+            .close()
+            .context("cannot release random reference pathname")?;
+        Ok((path, name))
+    }
+
+    fn probe_fd_linkat_support(&self) -> Result<()> {
+        let mut temporary = RetainedReferenceTemporary::create(self)?;
+        temporary
+            .file
+            .write_all(b"aurscan-reference-linkat-probe\n")
+            .context("cannot write reference publication capability probe")?;
+        temporary
+            .file
+            .sync_all()
+            .context("cannot sync reference publication capability probe")?;
+        temporary.unlink_owned_path()?;
+
+        let (probe_path, probe_name) = self.random_unused_path(".aurscan-reference-probe-")?;
+        let publication_result = (|| {
+            link_retained_reference_noclobber(&temporary.file, &self.directory, &probe_name)
+                .context("reference publication capability probe link failed")?;
+            let linked = open_optional_reference_file(&probe_path)?
+                .ok_or_else(|| anyhow!("reference publication capability probe is missing"))?;
+            same_open_file(&temporary.file, &linked)
+                .context("reference publication capability probe inode changed")
+        })();
+        let probe_cleanup = unlink_path_if_owned(&temporary.file, &probe_path)
+            .context("cannot clean reference publication capability probe");
+        let anchor_cleanup = temporary
+            .remove_owned_anchor()
+            .context("cannot clean reference publication capability anchor");
+        let directory_sync = self
+            .directory
+            .sync_all()
+            .context("cannot sync reference directory after capability probe");
+
+        publication_result?;
+        ensure!(
+            probe_cleanup?,
+            "reference capability probe path was replaced"
+        );
+        ensure!(anchor_cleanup?, "reference capability anchor was replaced");
+        directory_sync
+    }
 }
 
 fn open_reference_directory_beneath(workspace: &Path, path: &Path) -> Result<File> {
@@ -1510,6 +1490,16 @@ fn reference_child_path(_directory: &File, directory_path: &Path, name: &OsStr) 
 }
 
 #[cfg(target_os = "linux")]
+fn reference_directory_path(directory: &File, _directory_path: &Path) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reference_directory_path(_directory: &File, directory_path: &Path) -> PathBuf {
+    directory_path.to_path_buf()
+}
+
+#[cfg(target_os = "linux")]
 fn open_optional_reference_file(path: &Path) -> Result<Option<File>> {
     const O_NOFOLLOW: i32 = 0o400000;
     match fs::symlink_metadata(path) {
@@ -1548,35 +1538,6 @@ fn open_optional_reference_file(path: &Path) -> Result<Option<File>> {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn create_reference_candidate(path: &Path) -> Result<File> {
-    const O_NOFOLLOW: i32 = 0o400000;
-    OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .custom_flags(O_NOFOLLOW)
-        .open(path)
-        .context("cannot exclusively create reference report candidate")
-}
-
-#[cfg(not(target_os = "linux"))]
-fn create_reference_candidate(path: &Path) -> Result<File> {
-    OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .context("cannot exclusively create reference report candidate")
-}
-
-fn ensure_reference_final_unchanged(cleanup: &CandidateCleanup) -> Result<()> {
-    let current = open_optional_reference_file(&cleanup.output())?;
-    match (&cleanup.existing_output, current) {
-        (None, None) => Ok(()),
-        (Some(expected), Some(current)) => same_open_file(expected, &current),
-        _ => bail!("reference report final path changed during publication"),
-    }
-}
-
 #[cfg(unix)]
 fn file_identity(file: &File) -> Result<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
@@ -1602,66 +1563,286 @@ fn same_open_file(left: &File, right: &File) -> Result<()> {
     Ok(())
 }
 
-fn write_candidate_and_accept(
-    output: &Path,
+fn write_reference_first(
     report: &ReferenceReport,
-    candidate_cleanup: &mut CandidateCleanup,
+    publication: &ReferencePublication,
 ) -> Result<()> {
-    write_candidate_and_accept_with_hook(output, report, candidate_cleanup, |_| {})
+    write_reference_first_with_hook(report, publication, |_, _| {})
 }
 
-fn write_candidate_and_accept_with_hook(
-    output: &Path,
+fn write_reference_first_with_hook(
     report: &ReferenceReport,
-    candidate_cleanup: &mut CandidateCleanup,
-    after_candidate_sync: impl FnOnce(&Path),
+    publication: &ReferencePublication,
+    after_temporary_unlink: impl FnOnce(&Path, &Path),
 ) -> Result<()> {
-    ensure!(
-        candidate_cleanup.output_path == output,
-        "reference report output path changed"
-    );
     let value = serde_json::to_value(report).context("cannot inspect reference report")?;
     diagnostic::ensure_no_forbidden_keys(&value)?;
+    let failures = threshold_failures(RunKind::Qualification, &report.metrics);
+    ensure!(
+        failures.is_empty(),
+        "live evaluation release thresholds failed without accepting a report: {}",
+        failures.join(",")
+    );
     let mut bytes =
         serde_json::to_vec_pretty(report).context("cannot serialize reference report")?;
     bytes.push(b'\n');
-    candidate_cleanup.create_owned_candidate()?;
-    {
-        let candidate = candidate_cleanup
-            .owned_candidate_mut()
-            .ok_or_else(|| anyhow!("reference candidate ownership was not armed"))?;
-        candidate
-            .write_all(&bytes)
-            .context("cannot write reference report candidate")?;
-        candidate
-            .flush()
-            .context("cannot flush reference report candidate")?;
-        candidate
-            .sync_all()
-            .context("cannot sync reference report candidate")?;
-    }
-    let candidate_path = candidate_cleanup.candidate();
-    after_candidate_sync(&candidate_path);
 
-    let failures = threshold_failures(RunKind::Qualification, &report.metrics);
-    if !failures.is_empty() {
-        candidate_cleanup.remove_owned_candidate()?;
-        bail!(
-            "live evaluation release thresholds failed without accepting a report: {}",
-            failures.join(",")
-        );
-    }
-    candidate_cleanup.ensure_candidate_entry_is_owned()?;
-    ensure_reference_final_unchanged(candidate_cleanup)?;
-    fs::rename(&candidate_path, candidate_cleanup.output())
-        .context("cannot atomically accept the locked owned reference candidate")?;
-    candidate_cleanup.ensure_output_entry_is_owned()?;
-    candidate_cleanup
+    let mut temporary = RetainedReferenceTemporary::create(publication)?;
+    temporary
+        .file
+        .write_all(&bytes)
+        .context("cannot write reference temporary file")?;
+    temporary
+        .file
+        .flush()
+        .context("cannot flush reference temporary file")?;
+    temporary
+        .file
+        .sync_all()
+        .context("cannot sync reference temporary file")?;
+
+    let temporary_path = temporary.path.clone();
+    let anchor_path = temporary.anchor_path.clone();
+    temporary.unlink_owned_path()?;
+    after_temporary_unlink(&temporary_path, &anchor_path);
+    ensure!(
+        file_identity(&temporary.file)? == temporary.identity,
+        "retained reference temporary inode changed"
+    );
+
+    link_retained_reference_noclobber(
+        &temporary.file,
+        &publication.directory,
+        &publication.output_name,
+    )
+    .context("cannot publish immutable reference report without clobbering")?;
+    let accepted_result = (|| {
+        let accepted = open_optional_reference_file(&publication.output())?
+            .ok_or_else(|| anyhow!("published reference report is missing"))?;
+        same_open_file(&temporary.file, &accepted)
+    })();
+    let anchor_cleanup = temporary
+        .remove_owned_anchor()
+        .context("cannot clean random reference inode anchor");
+    let directory_sync = publication
         .directory
         .sync_all()
-        .context("cannot sync accepted reference report directory")?;
-    candidate_cleanup.disarm();
+        .context("cannot sync accepted reference report directory");
+
+    accepted_result?;
+    ensure!(
+        anchor_cleanup?,
+        "random reference inode anchor was replaced"
+    );
+    directory_sync
+}
+
+struct RetainedReferenceTemporary {
+    file: File,
+    path: PathBuf,
+    anchor_path: PathBuf,
+    identity: FileIdentity,
+    path_is_owned: bool,
+    anchor_is_owned: bool,
+}
+
+impl RetainedReferenceTemporary {
+    fn create(publication: &ReferencePublication) -> Result<Self> {
+        let file = create_linkable_reference_file(&publication.directory)?;
+        ensure!(
+            file.metadata()
+                .context("cannot inspect reference temporary file")?
+                .is_file(),
+            "reference temporary is not a regular file"
+        );
+        set_reference_file_mode(&file)?;
+        let identity =
+            file_identity(&file).context("cannot identify retained reference temporary inode")?;
+        let (path, name) = publication.random_unused_path(".aurscan-reference-")?;
+        link_retained_reference_noclobber(&file, &publication.directory, &name)
+            .context("cannot attach random pathname to reference temporary inode")?;
+        let mut temporary = Self {
+            file,
+            path,
+            anchor_path: PathBuf::new(),
+            identity,
+            path_is_owned: true,
+            anchor_is_owned: false,
+        };
+        let (anchor_path, anchor_name) =
+            publication.random_unused_path(".aurscan-reference-anchor-")?;
+        link_retained_reference_noclobber(&temporary.file, &publication.directory, &anchor_name)
+            .context("cannot attach random reference inode anchor")?;
+        temporary.anchor_path = anchor_path;
+        temporary.anchor_is_owned = true;
+        temporary.ensure_owned_path(&temporary.path, "temporary")?;
+        temporary.ensure_owned_path(&temporary.anchor_path, "anchor")?;
+        Ok(temporary)
+    }
+
+    fn ensure_owned_path(&self, path: &Path, label: &str) -> Result<()> {
+        let attached = open_optional_reference_file(path)?
+            .ok_or_else(|| anyhow!("random reference {label} path is missing"))?;
+        same_open_file(&self.file, &attached)
+            .with_context(|| format!("random reference {label} path changed"))
+    }
+
+    fn unlink_owned_path(&mut self) -> Result<()> {
+        ensure!(
+            self.path_is_owned,
+            "reference temporary pathname is not owned"
+        );
+        self.ensure_owned_path(&self.path, "temporary")?;
+        fs::remove_file(&self.path).context("cannot unlink random reference temporary pathname")?;
+        self.path_is_owned = false;
+        Ok(())
+    }
+
+    fn remove_owned_anchor(&mut self) -> Result<bool> {
+        if !self.anchor_is_owned {
+            return Ok(false);
+        }
+        let removed = unlink_path_if_owned(&self.file, &self.anchor_path)?;
+        self.anchor_is_owned = false;
+        Ok(removed)
+    }
+}
+
+impl Drop for RetainedReferenceTemporary {
+    fn drop(&mut self) {
+        for (owned, path) in [
+            (self.path_is_owned, self.path.as_path()),
+            (self.anchor_is_owned, self.anchor_path.as_path()),
+        ] {
+            if !owned {
+                continue;
+            }
+            match unlink_path_if_owned(&self.file, path) {
+                Ok(_) => {}
+                Err(error) => eprintln!(
+                    "failed to clean random reference link {}: {}",
+                    diagnostic::terminal_escape(&path.to_string_lossy()),
+                    diagnostic::terminal_escape(&error.to_string())
+                ),
+            }
+        }
+    }
+}
+
+fn unlink_path_if_owned(source: &File, path: &Path) -> Result<bool> {
+    let Some(attached) = open_optional_reference_file(path)? else {
+        return Ok(false);
+    };
+    if file_identity(source)? != file_identity(&attached)? {
+        return Ok(false);
+    }
+    fs::remove_file(path).context("cannot remove owned random reference link")?;
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn create_linkable_reference_file(directory: &File) -> Result<File> {
+    use std::ffi::CString;
+    use std::os::fd::FromRawFd;
+    use std::os::raw::{c_char, c_int};
+
+    const O_CLOEXEC: c_int = 0o2000000;
+    const O_RDWR: c_int = 0o2;
+    const O_TMPFILE: c_int = 0o20200000;
+
+    extern "C" {
+        fn openat(directory_fd: c_int, path: *const c_char, flags: c_int, mode: c_int) -> c_int;
+    }
+
+    let current_directory = CString::new(".").expect("a dot contains no NUL byte");
+    // SAFETY: the path is a valid NUL-terminated C string, the retained directory descriptor is
+    // open, and a successful return transfers ownership of a new descriptor to File.
+    let descriptor = unsafe {
+        openat(
+            directory.as_raw_fd(),
+            current_directory.as_ptr(),
+            O_TMPFILE | O_RDWR | O_CLOEXEC,
+            0o644,
+        )
+    };
+    if descriptor < 0 {
+        Err(std::io::Error::last_os_error())
+            .context("cannot create linkable same-directory reference temporary inode")
+    } else {
+        // SAFETY: openat returned a fresh owned descriptor that has not been wrapped or closed.
+        Ok(unsafe { File::from_raw_fd(descriptor) })
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn create_linkable_reference_file(_directory: &File) -> Result<File> {
+    bail!("immutable retained-FD reference publication requires Linux O_TMPFILE")
+}
+
+#[cfg(unix)]
+fn set_reference_file_mode(file: &File) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(0o644))
+        .context("cannot set reference temporary file mode")
+}
+
+#[cfg(not(unix))]
+fn set_reference_file_mode(_file: &File) -> Result<()> {
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn link_retained_reference_noclobber(
+    source: &File,
+    destination_directory: &File,
+    destination_name: &OsStr,
+) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int};
+    use std::os::unix::ffi::OsStrExt;
+
+    const AT_FDCWD: c_int = -100;
+    const AT_SYMLINK_FOLLOW: c_int = 0x400;
+
+    extern "C" {
+        fn linkat(
+            old_directory_fd: c_int,
+            old_path: *const c_char,
+            new_directory_fd: c_int,
+            new_path: *const c_char,
+            flags: c_int,
+        ) -> c_int;
+    }
+
+    let source_path = CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))
+        .context("reference source descriptor path contains a NUL byte")?;
+    let destination_name = CString::new(destination_name.as_bytes())
+        .context("reference destination name contains a NUL byte")?;
+    // SAFETY: both C strings are NUL-terminated for the duration of the call, and both file
+    // descriptors are retained open. linkat creates a new directory entry and never clobbers one.
+    let result = unsafe {
+        linkat(
+            AT_FDCWD,
+            source_path.as_ptr(),
+            destination_directory.as_raw_fd(),
+            destination_name.as_ptr(),
+            AT_SYMLINK_FOLLOW,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("Linux linkat failed")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn link_retained_reference_noclobber(
+    _source: &File,
+    _destination_directory: &File,
+    _destination_name: &OsStr,
+) -> Result<()> {
+    bail!("immutable retained-FD reference publication requires Linux linkat")
 }
 
 fn rejected_evaluation_summary(report: &DiagnosticReport) -> String {
@@ -2062,8 +2243,13 @@ max_requests_per_run = 100
         let base = promotion_report(&expected_identity, &data);
         let missing_key_reads = Cell::new(0);
         let missing_sends = Cell::new(0);
+        let reference_area = tempfile::tempdir().unwrap();
+        let reference_output = reference_area.path().join("v1.json");
+        let reference_publication =
+            ReferencePublication::for_output(reference_area.path(), &reference_output).unwrap();
         assert!(orchestrate_provider_boundaries(
             RunKind::Qualification,
+            Some(&reference_publication),
             Some(&expected_identity),
             &data,
             None,
@@ -2302,8 +2488,13 @@ max_requests_per_run = 100
     ) {
         let key_reads = Cell::new(0);
         let sends = Cell::new(0);
+        let reference_area = tempfile::tempdir().unwrap();
+        let reference_output = reference_area.path().join("v1.json");
+        let reference_publication =
+            ReferencePublication::for_output(reference_area.path(), &reference_output).unwrap();
         let result = orchestrate_provider_boundaries(
             RunKind::Qualification,
+            Some(&reference_publication),
             Some(identity),
             data,
             Some(PromotionSource::Bytes { bytes, digest }),
@@ -2332,8 +2523,13 @@ max_requests_per_run = 100
         let digest = diagnostic::sha256_hex(&bytes);
         let key_reads = Cell::new(0);
         let sends = Cell::new(0);
+        let reference_area = tempfile::tempdir().unwrap();
+        let reference_output = reference_area.path().join("v1.json");
+        let reference_publication =
+            ReferencePublication::for_output(reference_area.path(), &reference_output).unwrap();
         orchestrate_provider_boundaries(
             RunKind::Qualification,
+            Some(&reference_publication),
             Some(&identity),
             &data,
             Some(PromotionSource::Bytes {
@@ -2352,76 +2548,317 @@ max_requests_per_run = 100
         .unwrap();
         assert_eq!(key_reads.get(), 1);
         assert_eq!(sends.get(), 1);
+        assert_eq!(fs::read_dir(reference_area.path()).unwrap().count(), 0);
+    }
+
+    fn serialized_reference_report(report: &ReferenceReport) -> Vec<u8> {
+        let mut bytes = serde_json::to_vec_pretty(report).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[cfg(unix)]
+    fn create_fifo(path: &Path) {
+        use std::ffi::CString;
+        use std::os::raw::{c_char, c_int};
+        use std::os::unix::ffi::OsStrExt;
+
+        extern "C" {
+            fn mkfifo(path: *const c_char, mode: u32) -> c_int;
+        }
+
+        let path = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: path is a valid NUL-terminated C string for the duration of the call.
+        let result = unsafe { mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(
+            result,
+            0,
+            "mkfifo failed: {}",
+            std::io::Error::last_os_error()
+        );
     }
 
     #[test]
-    fn rejected_reference_candidate_preserves_existing_report() {
+    fn preexisting_reference_stops_before_key_and_provider_boundaries() {
+        let workspace = corpus::workspace_root().unwrap();
+        let data = corpus::load_and_validate(&workspace).unwrap();
+        let identity = promotion_identity(&data);
+        let report = promotion_report(&identity, &data);
+        let mut bytes = serde_json::to_vec_pretty(&report).unwrap();
+        bytes.push(b'\n');
+        let digest = diagnostic::sha256_hex(&bytes);
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("v1.json");
-        fs::write(&output, b"existing-report\n").unwrap();
-        let mut cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
+        fs::write(&output, b"accepted-reference\n").unwrap();
+        let key_reads = Cell::new(0);
+        let sends = Cell::new(0);
+
+        let result =
+            ReferencePublication::for_output(temporary.path(), &output).and_then(|publication| {
+                orchestrate_provider_boundaries(
+                    RunKind::Qualification,
+                    Some(&publication),
+                    Some(&identity),
+                    &data,
+                    Some(PromotionSource::Bytes {
+                        bytes: &bytes,
+                        digest: &digest,
+                    }),
+                    || {
+                        key_reads.set(key_reads.get() + 1);
+                        Ok(())
+                    },
+                    || {
+                        sends.set(sends.get() + 1);
+                        Ok(())
+                    },
+                )
+            });
+
+        assert!(result.is_err());
+        assert_eq!(key_reads.get(), 0);
+        assert_eq!(sends.get(), 0);
+        assert_eq!(fs::read(&output).unwrap(), b"accepted-reference\n");
+        assert!(!temporary.path().join("v1.json.candidate").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fifo_promotion_artifact_returns_promptly_before_key_or_provider_access() {
+        use std::time::Duration;
+
+        let workspace = corpus::workspace_root().unwrap();
+        let data = corpus::load_and_validate(&workspace).unwrap();
+        let identity = promotion_identity(&data);
+        let temporary = tempfile::tempdir().unwrap();
+        let state_home = temporary.path().to_path_buf();
+        let fifo = state_home.join("aurscan/eval-runs/promotion.json");
+        fs::create_dir_all(fifo.parent().unwrap()).unwrap();
+        create_fifo(&fifo);
+        let writer_fifo = fifo.clone();
+        let delayed_writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(writer_fifo)
+                .unwrap()
+        });
+        let key_reads = Cell::new(0);
+        let sends = Cell::new(0);
+        let reference_output = state_home.join("v1.json");
+        let reference_publication =
+            ReferencePublication::for_output(&state_home, &reference_output).unwrap();
+        let started = Instant::now();
+
+        let result = orchestrate_provider_boundaries(
+            RunKind::Qualification,
+            Some(&reference_publication),
+            Some(&identity),
+            &data,
+            Some(PromotionSource::Path {
+                state_home: &state_home,
+                path: &fifo,
+                digest: &"00".repeat(32),
+            }),
+            || {
+                key_reads.set(key_reads.get() + 1);
+                Ok(())
+            },
+            || {
+                sends.set(sends.get() + 1);
+                Ok(())
+            },
+        );
+        let elapsed = started.elapsed();
+        drop(delayed_writer.join().unwrap());
+
+        assert!(result.is_err());
+        assert!(elapsed < Duration::from_millis(200), "elapsed {elapsed:?}");
+        assert_eq!(key_reads.get(), 0);
+        assert_eq!(sends.get(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn random_temporary_path_replacement_cannot_substitute_published_bytes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        publication.ensure_vacant().unwrap();
+        let report = reference_report(passing_metrics());
+        let expected = serialized_reference_report(&report);
+        let mut replacement_path = None;
+
+        write_reference_first_with_hook(&report, &publication, |unlinked_temporary, _anchor| {
+            assert!(!unlinked_temporary.exists());
+            fs::write(unlinked_temporary, b"replacement-temporary\n").unwrap();
+            replacement_path = Some(unlinked_temporary.to_path_buf());
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(&output).unwrap(), expected);
+        assert_eq!(
+            fs::read(replacement_path.unwrap()).unwrap(),
+            b"replacement-temporary\n"
+        );
+        assert!(!temporary.path().join("v1.json.candidate").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn random_anchor_replacement_is_not_published_or_removed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        publication.ensure_vacant().unwrap();
+        let mut replacement_anchor = None;
+
+        let result = write_reference_first_with_hook(
+            &reference_report(passing_metrics()),
+            &publication,
+            |_unlinked_temporary, anchor| {
+                fs::remove_file(anchor).unwrap();
+                fs::write(anchor, b"replacement-anchor\n").unwrap();
+                replacement_anchor = Some(anchor.to_path_buf());
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(!output.exists());
+        assert_eq!(
+            fs::read(replacement_anchor.unwrap()).unwrap(),
+            b"replacement-anchor\n"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_first_writers_publish_exactly_one_owned_report() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = temporary.path().to_path_buf();
+        let output = workspace.join("v1.json");
+        let first_publication = ReferencePublication::for_output(&workspace, &output).unwrap();
+        first_publication.ensure_vacant().unwrap();
+        let other_workspace = workspace.clone();
+        let other_output = output.clone();
+
+        let second = std::thread::spawn(move || {
+            ReferencePublication::for_output(&other_workspace, &other_output)
+        })
+        .join()
+        .unwrap();
+        assert!(second.is_err());
+
+        let first_report = reference_report(passing_metrics());
+        let first_bytes = serialized_reference_report(&first_report);
+        write_reference_first(&first_report, &first_publication).unwrap();
+        assert_eq!(fs::read(&output).unwrap(), first_bytes);
+        assert!(!temporary.path().join("v1.json.candidate").exists());
+    }
+
+    #[test]
+    fn unsupported_reference_publication_stops_before_key_and_provider_boundaries() {
+        let workspace = corpus::workspace_root().unwrap();
+        let data = corpus::load_and_validate(&workspace).unwrap();
+        let identity = promotion_identity(&data);
+        let report = promotion_report(&identity, &data);
+        let mut bytes = serde_json::to_vec_pretty(&report).unwrap();
+        bytes.push(b'\n');
+        let digest = diagnostic::sha256_hex(&bytes);
+        let temporary = tempfile::tempdir().unwrap();
+        let report_directory = temporary.path().join("reports");
+        fs::create_dir(&report_directory).unwrap();
+        let output = report_directory.join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        fs::remove_dir(&report_directory).unwrap();
+        let key_reads = Cell::new(0);
+        let sends = Cell::new(0);
+
+        let result = orchestrate_provider_boundaries(
+            RunKind::Qualification,
+            Some(&publication),
+            Some(&identity),
+            &data,
+            Some(PromotionSource::Bytes {
+                bytes: &bytes,
+                digest: &digest,
+            }),
+            || {
+                key_reads.set(key_reads.get() + 1);
+                Ok(())
+            },
+            || {
+                sends.set(sends.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(key_reads.get(), 0);
+        assert_eq!(sends.get(), 0);
+    }
+
+    #[test]
+    fn rejected_reference_report_is_never_published() {
+        let temporary = tempfile::tempdir().unwrap();
+        let output = temporary.path().join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        publication.ensure_vacant().unwrap();
         let mut metrics = passing_metrics();
         metrics.semantic_expected_kind_rate = 0.0;
-        let report = reference_report(metrics);
-        assert!(write_candidate_and_accept(&output, &report, &mut cleanup).is_err());
-        assert_eq!(fs::read(&output).unwrap(), b"existing-report\n");
-        assert!(!candidate_path(&output).unwrap().exists());
+
+        assert!(write_reference_first(&reference_report(metrics), &publication).is_err());
+        assert!(!output.exists());
+        assert!(!temporary.path().join("v1.json.candidate").exists());
     }
 
     #[test]
     fn missing_reference_report_directory_is_created_beneath_workspace() {
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("nested/reports/v1.json");
-        let cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
         assert!(output.parent().unwrap().is_dir());
-        drop(cleanup);
+        publication.ensure_vacant().unwrap();
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn reference_paths_reject_candidate_and_final_symlinks() {
+    fn reference_preflight_rejects_a_final_symlink() {
         use std::os::unix::fs::symlink;
 
         let temporary = tempfile::tempdir().unwrap();
-        let reports = temporary.path().join("reports");
-        fs::create_dir(&reports).unwrap();
         let outside = temporary.path().join("outside.json");
         fs::write(&outside, b"outside\n").unwrap();
-        let output = reports.join("v1.json");
-        let candidate = candidate_path(&output).unwrap();
-        symlink(&outside, &candidate).unwrap();
-        assert!(CandidateCleanup::for_output(temporary.path(), &output).is_err());
-        assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
-
-        fs::remove_file(&candidate).unwrap();
+        let output = temporary.path().join("v1.json");
         symlink(&outside, &output).unwrap();
-        assert!(CandidateCleanup::for_output(temporary.path(), &output).is_err());
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+
+        assert!(publication.ensure_vacant().is_err());
         assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn reference_publication_rejects_a_final_symlink_swapped_after_preparation() {
+    fn reference_publication_fails_closed_if_final_appears_after_preflight() {
         use std::os::unix::fs::symlink;
 
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("v1.json");
-        fs::write(&output, b"existing\n").unwrap();
-        let mut cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        publication.ensure_vacant().unwrap();
         let outside = temporary.path().join("outside.json");
         fs::write(&outside, b"outside\n").unwrap();
-        fs::remove_file(&output).unwrap();
         symlink(&outside, &output).unwrap();
 
-        assert!(write_candidate_and_accept(
-            &output,
-            &reference_report(passing_metrics()),
-            &mut cleanup,
-        )
-        .is_err());
-        drop(cleanup);
+        assert!(
+            write_reference_first(&reference_report(passing_metrics()), &publication,).is_err()
+        );
         assert_eq!(fs::read(&outside).unwrap(), b"outside\n");
-        assert!(!candidate_path(&output).unwrap().exists());
+        assert!(fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     #[cfg(target_os = "linux")]
@@ -2433,70 +2870,39 @@ max_requests_per_run = 100
         let reports = temporary.path().join("reports");
         fs::create_dir(&reports).unwrap();
         let output = reports.join("v1.json");
-        fs::write(&output, b"existing\n").unwrap();
-        let mut cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        publication.ensure_vacant().unwrap();
         let retained = temporary.path().join("retained-reports");
         fs::rename(&reports, &retained).unwrap();
         let outside = tempfile::tempdir().unwrap();
         symlink(outside.path(), &reports).unwrap();
-
         let report = reference_report(passing_metrics());
-        write_candidate_and_accept(&output, &report, &mut cleanup).unwrap();
 
-        assert_ne!(fs::read(retained.join("v1.json")).unwrap(), b"existing\n");
+        write_reference_first(&report, &publication).unwrap();
+
+        assert_eq!(
+            fs::read(retained.join("v1.json")).unwrap(),
+            serialized_reference_report(&report)
+        );
         assert!(!outside.path().join("v1.json").exists());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn candidate_replacement_is_neither_accepted_nor_unlinked() {
+    fn no_clobber_publication_never_removes_a_racing_final() {
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("v1.json");
-        fs::write(&output, b"existing\n").unwrap();
-        let mut cleanup = CandidateCleanup::for_output(temporary.path(), &output).unwrap();
-        let candidate = candidate_path(&output).unwrap();
-        let result = write_candidate_and_accept_with_hook(
-            &output,
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+        publication.ensure_vacant().unwrap();
+
+        let result = write_reference_first_with_hook(
             &reference_report(passing_metrics()),
-            &mut cleanup,
-            |_| {
-                fs::remove_file(&candidate).unwrap();
-                fs::write(&candidate, b"replacement-candidate\n").unwrap();
-            },
+            &publication,
+            |_, _| fs::write(&output, b"racing-first-writer\n").unwrap(),
         );
+
         assert!(result.is_err());
-        drop(cleanup);
-        assert_eq!(fs::read(&output).unwrap(), b"existing\n");
-        assert_eq!(fs::read(&candidate).unwrap(), b"replacement-candidate\n");
-    }
-
-    #[test]
-    fn concurrent_publication_run_cannot_delete_or_accept_the_owned_candidate() {
-        let temporary = tempfile::tempdir().unwrap();
-        let workspace = temporary.path().to_path_buf();
-        let output = workspace.join("v1.json");
-        fs::write(&output, b"existing\n").unwrap();
-        let mut first = CandidateCleanup::for_output(&workspace, &output).unwrap();
-        first.create_owned_candidate().unwrap();
-        first
-            .owned_candidate_mut()
-            .unwrap()
-            .write_all(b"first-run-candidate\n")
-            .unwrap();
-        let candidate = candidate_path(&output).unwrap();
-
-        let other_workspace = workspace.clone();
-        let other_output = output.clone();
-        let second = std::thread::spawn(move || {
-            CandidateCleanup::for_output(&other_workspace, &other_output).map(drop)
-        })
-        .join()
-        .unwrap();
-        assert!(second.is_err());
-        assert_eq!(fs::read(&candidate).unwrap(), b"first-run-candidate\n");
-        assert_eq!(fs::read(&output).unwrap(), b"existing\n");
-
-        drop(first);
-        assert!(!candidate.exists());
-        assert_eq!(fs::read(&output).unwrap(), b"existing\n");
+        assert_eq!(fs::read(&output).unwrap(), b"racing-first-writer\n");
+        assert!(!temporary.path().join("v1.json.candidate").exists());
     }
 }
