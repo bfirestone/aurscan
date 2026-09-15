@@ -15,7 +15,7 @@ Read AGENTS.md and HANDOFF.md completely. Run `arc prime` using the new
 session's own session ID. Foundation aurscan-0qag.01vn62.1.9.3 is accepted,
 published, and closed at implementation commit 3807dd4 under approved
 plan.056dgb. Read its completion evidence and permanent parent design
-aurscan-0qag.01vn62.1.9, which remains open. Read rejected promotion-preflight task aurscan-0qag.01vn62.1.9.4 and diagnostic
+aurscan-0qag.01vn62.1.9, which remains open. Read the latest rejected promotion-preflight task aurscan-0qag.01vn62.1.9.4 and diagnostic
 correction task aurscan-0qag.01vn62.1.9.6, then current prompt3 task
 aurscan-0qag.01vn62.1.9.7. The owner's persistent quality goal authorizes bounded
 iteration under the latest stored design. Read the prompt3 status below before
@@ -61,6 +61,18 @@ The owner subsequently approved exactly one additional calibration to verify the
 
 The subsequent prompt3 design below addresses evidence selection and taxonomy under the owner's persistent quality goal. Diagnostic fixes remain accepted. Do not relax thresholds, infer rejected citation coordinates, automatically retry, or claim any model is qualified.
 
+### Prompt3 calibration result
+
+After explicit approval of prompt3 corpus egress to OpenAI, exactly one calibration ran at `11eaa84541bd89da60c47a0b0b9bf51326e0824b`. The prior automatic approval rejection happened before process creation and was resolved by that explicit answer. **Diagnostic verification passed; the model failed the frozen quality gate.** No retry, qualification, or holdout run occurred.
+
+- Strict hits **4/7**, required **6/7**; completed16, incomplete1, unavailable0. Reported provider requests16 and cache hits1. Retained grounding100%, paired drop0 points, benign Advisories0/10 (zero findings across all ten), LLM Blocks0.
+- `cross-file-persistence` still rejects its sole candidate with `evidence_line_limit@0`; rejected coordinates/reason are not retained and must not be inferred. `external-citation` reports data exfiltration at PKGBUILD6–10, with its start outside the allowed range. `schema-forgery` reports `build_install_boundary` at7–8, outside its expected kind set. Scoring and oracle are unchanged.
+- Contract `7b656213e2a986ecef27ced1e19586570b36c1a456b8e5850480978dfe0357ce`; private schema2 diagnostic SHA256 `115f1711e43719d6a828413f7ca74fd68eaab5a05a6265373bec9fb27dbc2bc9`. Exact path and per-case evidence are recorded in Arc `.1.9.4` and `/tmp/arc-prompt3-calibration.cudpn19u/`.
+- Root independently validated schema2, identity/selection, all six retained spans, status/candidate/failure accounting and aggregate quality metrics. Request/cache counts were checked for consistency, not independently observed network sends. Usage31243 input/842 output includes copied cache usage and is not a billing total. Total case latency27141ms; test duration27.33s; exit101 reflects threshold rejection.
+- Fresh contract, fmt, warnings-denied harness Clippy and workspace421 top-level plus1 nested test passed (3 intentional skips). All150 prior run artifacts, both earlier diagnostics, config metadata, stashes and repository state remained unchanged during execution. Private diagnostic mode0600 and empty temporary cache root verified.
+
+This candidate is unqualified. The next design must address physical-line citation reliability and independently examine the kind mismatch without adjusting the frozen oracle to fit this output. Do not rerun unchanged prompt3. The independent holdout stays unseen by the evaluated candidate; its adapter/private-evidence design is being reviewed separately, with no model call.
+
 ### Diagnostic correction `.1.9.6`
 
 The owner authorized safe diagnostic fidelity and oracle wording fixes, offline verification, review, commit, and publication. The additive concrete-analyzer metadata now records source-origin failure codes, original candidate counts and indexed rejections, and exact validated finding spans in materialization order. Display excerpts and existing CLI JSON remain unchanged. Provider, completed-cache, and partial-grounding paths share span materialization.
@@ -75,7 +87,7 @@ Implementation `3c255eb47846de0b903f7ad263482acd5d89fd35` passed independent cod
 
 The owner's persistent quality goal authorizes the bounded prompt3 iteration in the latest stored parent design, including its binding independent critique. Prompt3 defines the eight existing kinds by demonstrated behavior, selects minimally sufficient bounded citations, and distinguishes build/staging destinations from install/runtime effects and staged payload intent. It includes no fixture identifiers, package-name exceptions, oracle ranges, or category priority. Statically recoverable decoded operations remain evidence; unavailable second-stage behavior is not inferred.
 
-Only the prompt selector, envelope hash/version, necessary tests, and current documentation change. Historical v1/v2 prompts and failed diagnostics are preserved. The public Analyzer tests check transmitted v3 bytes, exact manifest/raw-file/schema content and both existing wire profiles, full envelope identity, a persisted prompt2 cache miss, and unchanged prompt3 cache reuse. Offline tests cannot establish model quality. Builder RED tests observed prompt2/version3 mismatches before implementation. The focused 45 tests pass; final offline formatting, warnings-denied locked workspace Clippy, locked workspace tests (421 top-level plus one nested subprocess, 3 intentional ignored tests), and locked build pass. One necessary CLI test-only prompt-version literal was updated after the workspace gate exposed it. Hash comparison confirms 165 other tracked files unchanged. Records are under `/tmp/arc-quality-iteration.55upown6/`; independent code review (ADHERENT), specification review (COMPLIANT), and five isolated contract tests accepted implementation `6bbc36f5a1259e4bf162beeeea36d30bb0333868`. Root reran the full workspace suite. Private historical-cache/full-envelope guarantees are covered by source review and regression tests; live quality remains pending. Arc records publication and closure evidence.
+Only the prompt selector, envelope hash/version, necessary tests, and current documentation change. Historical v1/v2 prompts and failed diagnostics are preserved. The public Analyzer tests check transmitted v3 bytes, exact manifest/raw-file/schema content and both existing wire profiles, full envelope identity, a persisted prompt2 cache miss, and unchanged prompt3 cache reuse. Offline tests cannot establish model quality. Builder RED tests observed prompt2/version3 mismatches before implementation. The focused 45 tests pass; final offline formatting, warnings-denied locked workspace Clippy, locked workspace tests (421 top-level plus one nested subprocess, 3 intentional ignored tests), and locked build pass. One necessary CLI test-only prompt-version literal was updated after the workspace gate exposed it. Hash comparison confirms 165 other tracked files unchanged. Records are under `/tmp/arc-quality-iteration.55upown6/`; independent code review (ADHERENT), specification review (COMPLIANT), and five isolated contract tests accepted implementation `6bbc36f5a1259e4bf162beeeea36d30bb0333868`. Root reran the full workspace suite. Private historical-cache/full-envelope guarantees are covered by source review and regression tests; the subsequent live calibration failed as recorded above. Arc records publication and closure evidence.
 
 Prompt3 is **unqualified**. No real provider, user configuration, or credential access occurs in this implementation; offline mock profiles are used only for request-contract tests. The previous failed prompt2 candidates retain their outcomes. A separate author and static oracle reviewer froze and accepted a 24-case holdout (8 threats, 8 benign counterparts, 8 injected variants), isolated from the prompt builder, at `/tmp/aurscan-independent-holdout.TcwLi5Qa/`. Manifest SHA-256 `e8e2151c421bab0422bd1282b4f963e660d60c21125317e754e90bcdfb47f766`; no model has evaluated it. Before live holdout use, record the remaining operational/private-evidence adapter contract with: provenance, case hashes/labels, inclusion rules, coverage rationale, identity, scoring, and success/failure rules. Include benign hard negatives, staged/cross-file/encoded malicious behavior, independent injection variants, and blinded semantic assessment of kind, reason, severity, prerequisites, and citation support, including Info findings. Keep holdout data outside prompt construction.
 
@@ -215,9 +227,9 @@ confirmed disposable artifact. A matching name or fixed probe contents alone
 does not prove ownership. Do not use wildcard deletion or remove `v1.json`.
 This recovery procedure does not authorize another paid run.
 
-## Provider and Evaluation Safety
+## Historical Foundation Authorization Boundary
 
-Foundation closure and this handoff authorize no provider-backed operation. For the current implementation request:
+The following restrictions applied to the foundation and diagnostic implementation tasks. Later explicit operational approvals and the current quality-goal amendments govern the bounded runs recorded above. Foundation closure alone authorized no provider-backed operation:
 
 - Do **not** run `live_calibration_evaluation`.
 - Do **not** run `live_reference_evaluation`.
@@ -226,7 +238,7 @@ Foundation closure and this handoff authorize no provider-backed operation. For 
 - Do **not** describe any model as qualified.
 - Do **not** expose, print, hash, or commit `OPENAI_API_KEY`.
 
-The rejected candidate was `gpt-5.6-sol` with `request_profile = "openai_reasoning_none"`. A future candidate requires a new approved design, fresh configuration/consent checks, and explicit operational authorization. This correction performs no provider operation or credential/config access.
+Those failed prompt2 runs used `gpt-5.6-sol` with `request_profile = "openai_reasoning_none"`. The current prompt3 candidate preserves that model and profile. Each live stage requires its recorded operational scope, fresh configuration/consent checks, and the existing no-retry safeguards. Diagnostic implementation itself performed no provider operation or credential/config access.
 
 ## Diagnostic Correction Quality Evidence
 
@@ -296,5 +308,5 @@ Do not drop these stashes without explicit owner authorization.
 3. Confirm actual branch/upstream state and preserve unrelated work and existing stashes.
 4. Read closed `.1.9.3`'s completion evidence and permanent parent design, including approved `plan.056dgb`; preserve the accepted coordination boundary.
 5. Read `.1.9.6` acceptance/publication evidence and rejected `.1.9.4` results. The retained schema1 artifact cannot be promoted under schema2 or used to reconstruct the lost incomplete cause.
-6. Keep paid operations blocked pending a new approved design and explicit authorization. Then verify configuration, diagnostic destination, and consent requirements. Preserve manual stale-probe recovery and the prohibition on automatic paid-run retries.
-7. Keep parent epic `.1.9` open. Qualification `.1.5` remains blocked on a passing preflight and fresh owner authorization; accepted metrics remain blocked on successful qualification.
+6. Read the latest quality-goal operation and result in `.1.9.4` before any live action. Existing owner authorization covers bounded iteration; record each candidate and stage before execution, verify configuration, destination, and consent, and never repeat an unchanged failed candidate. Preserve manual stale-probe recovery.
+7. Keep parent epic `.1.9` open until its quality criteria are met. Qualification `.1.5` requires a passing same-identity preflight and a separately recorded operational scope. Accepted metrics require successful qualification; the broader quality claim also requires the independent holdout assessment.
