@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -1351,10 +1351,6 @@ impl ReferencePublication {
         reference_child_path(&self.directory, &self.directory_path, &self.output_name)
     }
 
-    fn temporary_directory(&self) -> PathBuf {
-        reference_directory_path(&self.directory, &self.directory_path)
-    }
-
     fn ensure_vacant(&self) -> Result<()> {
         match fs::symlink_metadata(self.output()) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1369,59 +1365,56 @@ impl ReferencePublication {
         self.ensure_vacant()
     }
 
-    fn random_unused_path(&self, prefix: &str) -> Result<(PathBuf, OsString)> {
-        let placeholder = tempfile::Builder::new()
-            .prefix(prefix)
-            .tempfile_in(self.temporary_directory())
-            .context("cannot reserve random same-directory reference pathname")?;
-        let path = placeholder.path().to_path_buf();
-        let name = path
-            .file_name()
-            .ok_or_else(|| anyhow!("random reference path has no file name"))?
-            .to_os_string();
-        placeholder
-            .close()
-            .context("cannot release random reference pathname")?;
-        Ok((path, name))
-    }
-
     fn probe_fd_linkat_support(&self) -> Result<()> {
-        let mut temporary = RetainedReferenceTemporary::create(self)?;
+        const PROBE_BYTES: &[u8] = b"aurscan-reference-linkat-probe\n";
+
+        let mut temporary = PathlessReferenceTemporary::create(&self.directory)?;
         temporary
             .file
-            .write_all(b"aurscan-reference-linkat-probe\n")
+            .write_all(PROBE_BYTES)
             .context("cannot write reference publication capability probe")?;
+        temporary
+            .file
+            .flush()
+            .context("cannot flush reference publication capability probe")?;
         temporary
             .file
             .sync_all()
             .context("cannot sync reference publication capability probe")?;
-        temporary.unlink_owned_path()?;
 
-        let (probe_path, probe_name) = self.random_unused_path(".aurscan-reference-probe-")?;
-        let publication_result = (|| {
-            link_retained_reference_noclobber(&temporary.file, &self.directory, &probe_name)
-                .context("reference publication capability probe link failed")?;
-            let linked = open_optional_reference_file(&probe_path)?
+        let probe_name = random_reference_probe_name()?;
+        link_retained_reference_noclobber(&temporary.file, &self.directory, &probe_name)
+            .context("reference publication capability probe link failed")?;
+        let probe_path = reference_child_path(&self.directory, &self.directory_path, &probe_name);
+        let verification = (|| {
+            let mut linked = open_optional_reference_file(&probe_path)?
                 .ok_or_else(|| anyhow!("reference publication capability probe is missing"))?;
             same_open_file(&temporary.file, &linked)
-                .context("reference publication capability probe inode changed")
+                .context("reference publication capability probe inode changed")?;
+            let mut linked_bytes = Vec::new();
+            linked
+                .read_to_end(&mut linked_bytes)
+                .context("cannot read reference publication capability probe")?;
+            ensure!(
+                linked_bytes == PROBE_BYTES,
+                "reference publication capability probe bytes changed"
+            );
+            Ok(())
         })();
-        let probe_cleanup = unlink_path_if_owned(&temporary.file, &probe_path)
-            .context("cannot clean reference publication capability probe");
-        let anchor_cleanup = temporary
-            .remove_owned_anchor()
-            .context("cannot clean reference publication capability anchor");
+        let cleanup = unlink_reference_probe_if_owned(
+            &temporary.file,
+            &self.directory,
+            &probe_name,
+            &probe_path,
+        )
+        .context("cannot clean reference publication capability probe");
         let directory_sync = self
             .directory
             .sync_all()
             .context("cannot sync reference directory after capability probe");
 
-        publication_result?;
-        ensure!(
-            probe_cleanup?,
-            "reference capability probe path was replaced"
-        );
-        ensure!(anchor_cleanup?, "reference capability anchor was replaced");
+        verification?;
+        ensure!(cleanup?, "reference capability probe final was replaced");
         directory_sync
     }
 }
@@ -1487,16 +1480,6 @@ fn reference_child_path(directory: &File, _directory_path: &Path, name: &OsStr) 
 #[cfg(not(target_os = "linux"))]
 fn reference_child_path(_directory: &File, directory_path: &Path, name: &OsStr) -> PathBuf {
     directory_path.join(name)
-}
-
-#[cfg(target_os = "linux")]
-fn reference_directory_path(directory: &File, _directory_path: &Path) -> PathBuf {
-    PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn reference_directory_path(_directory: &File, directory_path: &Path) -> PathBuf {
-    directory_path.to_path_buf()
 }
 
 #[cfg(target_os = "linux")]
@@ -1567,13 +1550,13 @@ fn write_reference_first(
     report: &ReferenceReport,
     publication: &ReferencePublication,
 ) -> Result<()> {
-    write_reference_first_with_hook(report, publication, |_, _| {})
+    write_reference_first_with_hook(report, publication, |_| {})
 }
 
 fn write_reference_first_with_hook(
     report: &ReferenceReport,
     publication: &ReferencePublication,
-    after_temporary_unlink: impl FnOnce(&Path, &Path),
+    before_publication: impl FnOnce(&File),
 ) -> Result<()> {
     let value = serde_json::to_value(report).context("cannot inspect reference report")?;
     diagnostic::ensure_no_forbidden_keys(&value)?;
@@ -1587,157 +1570,123 @@ fn write_reference_first_with_hook(
         serde_json::to_vec_pretty(report).context("cannot serialize reference report")?;
     bytes.push(b'\n');
 
-    let mut temporary = RetainedReferenceTemporary::create(publication)?;
+    let mut temporary = PathlessReferenceTemporary::create(&publication.directory)?;
     temporary
         .file
         .write_all(&bytes)
-        .context("cannot write reference temporary file")?;
+        .context("cannot write pathless reference temporary file")?;
     temporary
         .file
         .flush()
-        .context("cannot flush reference temporary file")?;
+        .context("cannot flush pathless reference temporary file")?;
     temporary
         .file
         .sync_all()
-        .context("cannot sync reference temporary file")?;
+        .context("cannot sync pathless reference temporary file")?;
 
-    let temporary_path = temporary.path.clone();
-    let anchor_path = temporary.anchor_path.clone();
-    temporary.unlink_owned_path()?;
-    after_temporary_unlink(&temporary_path, &anchor_path);
+    before_publication(&temporary.file);
     ensure!(
         file_identity(&temporary.file)? == temporary.identity,
-        "retained reference temporary inode changed"
+        "retained pathless reference temporary inode changed"
     );
-
     link_retained_reference_noclobber(
         &temporary.file,
         &publication.directory,
         &publication.output_name,
     )
     .context("cannot publish immutable reference report without clobbering")?;
-    let accepted_result = (|| {
-        let accepted = open_optional_reference_file(&publication.output())?
-            .ok_or_else(|| anyhow!("published reference report is missing"))?;
-        same_open_file(&temporary.file, &accepted)
-    })();
-    let anchor_cleanup = temporary
-        .remove_owned_anchor()
-        .context("cannot clean random reference inode anchor");
-    let directory_sync = publication
+    let accepted = open_optional_reference_file(&publication.output())?
+        .ok_or_else(|| anyhow!("published reference report is missing"))?;
+    same_open_file(&temporary.file, &accepted)?;
+    publication
         .directory
         .sync_all()
-        .context("cannot sync accepted reference report directory");
-
-    accepted_result?;
-    ensure!(
-        anchor_cleanup?,
-        "random reference inode anchor was replaced"
-    );
-    directory_sync
+        .context("cannot sync accepted reference report directory")
 }
 
-struct RetainedReferenceTemporary {
+struct PathlessReferenceTemporary {
     file: File,
-    path: PathBuf,
-    anchor_path: PathBuf,
     identity: FileIdentity,
-    path_is_owned: bool,
-    anchor_is_owned: bool,
 }
 
-impl RetainedReferenceTemporary {
-    fn create(publication: &ReferencePublication) -> Result<Self> {
-        let file = create_linkable_reference_file(&publication.directory)?;
+impl PathlessReferenceTemporary {
+    fn create(directory: &File) -> Result<Self> {
+        let file = create_linkable_reference_file(directory)?;
         ensure!(
             file.metadata()
-                .context("cannot inspect reference temporary file")?
+                .context("cannot inspect pathless reference temporary file")?
                 .is_file(),
-            "reference temporary is not a regular file"
+            "pathless reference temporary is not a regular file"
         );
         set_reference_file_mode(&file)?;
-        let identity =
-            file_identity(&file).context("cannot identify retained reference temporary inode")?;
-        let (path, name) = publication.random_unused_path(".aurscan-reference-")?;
-        link_retained_reference_noclobber(&file, &publication.directory, &name)
-            .context("cannot attach random pathname to reference temporary inode")?;
-        let mut temporary = Self {
-            file,
-            path,
-            anchor_path: PathBuf::new(),
-            identity,
-            path_is_owned: true,
-            anchor_is_owned: false,
-        };
-        let (anchor_path, anchor_name) =
-            publication.random_unused_path(".aurscan-reference-anchor-")?;
-        link_retained_reference_noclobber(&temporary.file, &publication.directory, &anchor_name)
-            .context("cannot attach random reference inode anchor")?;
-        temporary.anchor_path = anchor_path;
-        temporary.anchor_is_owned = true;
-        temporary.ensure_owned_path(&temporary.path, "temporary")?;
-        temporary.ensure_owned_path(&temporary.anchor_path, "anchor")?;
-        Ok(temporary)
-    }
-
-    fn ensure_owned_path(&self, path: &Path, label: &str) -> Result<()> {
-        let attached = open_optional_reference_file(path)?
-            .ok_or_else(|| anyhow!("random reference {label} path is missing"))?;
-        same_open_file(&self.file, &attached)
-            .with_context(|| format!("random reference {label} path changed"))
-    }
-
-    fn unlink_owned_path(&mut self) -> Result<()> {
-        ensure!(
-            self.path_is_owned,
-            "reference temporary pathname is not owned"
-        );
-        self.ensure_owned_path(&self.path, "temporary")?;
-        fs::remove_file(&self.path).context("cannot unlink random reference temporary pathname")?;
-        self.path_is_owned = false;
-        Ok(())
-    }
-
-    fn remove_owned_anchor(&mut self) -> Result<bool> {
-        if !self.anchor_is_owned {
-            return Ok(false);
-        }
-        let removed = unlink_path_if_owned(&self.file, &self.anchor_path)?;
-        self.anchor_is_owned = false;
-        Ok(removed)
+        let identity = file_identity(&file)
+            .context("cannot identify retained pathless reference temporary inode")?;
+        Ok(Self { file, identity })
     }
 }
 
-impl Drop for RetainedReferenceTemporary {
-    fn drop(&mut self) {
-        for (owned, path) in [
-            (self.path_is_owned, self.path.as_path()),
-            (self.anchor_is_owned, self.anchor_path.as_path()),
-        ] {
-            if !owned {
-                continue;
-            }
-            match unlink_path_if_owned(&self.file, path) {
-                Ok(_) => {}
-                Err(error) => eprintln!(
-                    "failed to clean random reference link {}: {}",
-                    diagnostic::terminal_escape(&path.to_string_lossy()),
-                    diagnostic::terminal_escape(&error.to_string())
-                ),
-            }
-        }
-    }
+#[cfg(target_os = "linux")]
+fn random_reference_probe_name() -> Result<OsString> {
+    let mut entropy = [0_u8; 16];
+    File::open("/dev/urandom")
+        .context("cannot open kernel randomness for reference capability probe")?
+        .read_exact(&mut entropy)
+        .context("cannot read kernel randomness for reference capability probe")?;
+    Ok(format!(".aurscan-reference-probe-{}", hex(&entropy)).into())
 }
 
-fn unlink_path_if_owned(source: &File, path: &Path) -> Result<bool> {
-    let Some(attached) = open_optional_reference_file(path)? else {
+#[cfg(not(target_os = "linux"))]
+fn random_reference_probe_name() -> Result<OsString> {
+    bail!("immutable retained-FD reference publication requires Linux")
+}
+
+#[cfg(target_os = "linux")]
+fn unlink_reference_probe_if_owned(
+    source: &File,
+    destination_directory: &File,
+    destination_name: &OsStr,
+    destination_path: &Path,
+) -> Result<bool> {
+    let Some(attached) = open_optional_reference_file(destination_path)? else {
         return Ok(false);
     };
     if file_identity(source)? != file_identity(&attached)? {
         return Ok(false);
     }
-    fs::remove_file(path).context("cannot remove owned random reference link")?;
+    unlink_reference_entry(destination_directory, destination_name)?;
     Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unlink_reference_probe_if_owned(
+    _source: &File,
+    _destination_directory: &File,
+    _destination_name: &OsStr,
+    _destination_path: &Path,
+) -> Result<bool> {
+    bail!("immutable retained-FD reference publication requires Linux")
+}
+
+#[cfg(target_os = "linux")]
+fn unlink_reference_entry(directory: &File, name: &OsStr) -> Result<()> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn unlinkat(directory_fd: c_int, path: *const c_char, flags: c_int) -> c_int;
+    }
+
+    let name = CString::new(name.as_bytes()).context("reference probe name contains a NUL byte")?;
+    // SAFETY: the name is NUL-terminated for the duration of the call and the retained directory
+    // descriptor remains open. A zero flag removes only a non-directory entry beneath that FD.
+    let result = unsafe { unlinkat(directory.as_raw_fd(), name.as_ptr(), 0) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+            .context("cannot unlink descriptor-relative reference capability probe")
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2681,54 +2630,61 @@ max_requests_per_run = 100
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn random_temporary_path_replacement_cannot_substitute_published_bytes() {
+    fn reference_capability_probe_removes_only_its_random_final() {
+        let temporary = tempfile::tempdir().unwrap();
+        let unrelated = temporary.path().join("unrelated");
+        fs::write(&unrelated, b"keep\n").unwrap();
+        let output = temporary.path().join("v1.json");
+        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
+
+        publication.preflight().unwrap();
+
+        assert_eq!(fs::read(&unrelated).unwrap(), b"keep\n");
+        assert_eq!(
+            fs::read_dir(temporary.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            [OsString::from("unrelated")]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reference_staging_is_pathless_and_publishes_the_exact_fd() {
+        use std::cell::Cell;
+        use std::os::unix::fs::PermissionsExt;
+
         let temporary = tempfile::tempdir().unwrap();
         let output = temporary.path().join("v1.json");
         let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
         publication.ensure_vacant().unwrap();
         let report = reference_report(passing_metrics());
         let expected = serialized_reference_report(&report);
-        let mut replacement_path = None;
+        let staged_identity = Cell::new(None);
 
-        write_reference_first_with_hook(&report, &publication, |unlinked_temporary, _anchor| {
-            assert!(!unlinked_temporary.exists());
-            fs::write(unlinked_temporary, b"replacement-temporary\n").unwrap();
-            replacement_path = Some(unlinked_temporary.to_path_buf());
+        write_reference_first_with_hook(&report, &publication, |staged| {
+            assert_eq!(fs::read_dir(temporary.path()).unwrap().count(), 0);
+            assert_eq!(
+                staged.metadata().unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+            staged_identity.set(Some(file_identity(staged).unwrap()));
         })
         .unwrap();
 
+        let accepted = open_optional_reference_file(&output).unwrap().unwrap();
+        assert_eq!(
+            file_identity(&accepted).unwrap(),
+            staged_identity.get().unwrap()
+        );
         assert_eq!(fs::read(&output).unwrap(), expected);
         assert_eq!(
-            fs::read(replacement_path.unwrap()).unwrap(),
-            b"replacement-temporary\n"
-        );
-        assert!(!temporary.path().join("v1.json.candidate").exists());
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn random_anchor_replacement_is_not_published_or_removed() {
-        let temporary = tempfile::tempdir().unwrap();
-        let output = temporary.path().join("v1.json");
-        let publication = ReferencePublication::for_output(temporary.path(), &output).unwrap();
-        publication.ensure_vacant().unwrap();
-        let mut replacement_anchor = None;
-
-        let result = write_reference_first_with_hook(
-            &reference_report(passing_metrics()),
-            &publication,
-            |_unlinked_temporary, anchor| {
-                fs::remove_file(anchor).unwrap();
-                fs::write(anchor, b"replacement-anchor\n").unwrap();
-                replacement_anchor = Some(anchor.to_path_buf());
-            },
-        );
-
-        assert!(result.is_err());
-        assert!(!output.exists());
-        assert_eq!(
-            fs::read(replacement_anchor.unwrap()).unwrap(),
-            b"replacement-anchor\n"
+            fs::read_dir(temporary.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>(),
+            [OsString::from("v1.json")]
         );
     }
 
@@ -2898,7 +2854,7 @@ max_requests_per_run = 100
         let result = write_reference_first_with_hook(
             &reference_report(passing_metrics()),
             &publication,
-            |_, _| fs::write(&output, b"racing-first-writer\n").unwrap(),
+            |_| fs::write(&output, b"racing-first-writer\n").unwrap(),
         );
 
         assert!(result.is_err());

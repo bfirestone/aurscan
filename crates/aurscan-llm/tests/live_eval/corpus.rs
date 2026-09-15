@@ -593,6 +593,9 @@ fn validate_benign_package(snapshot_root: &Path, package: &BenignPackage) -> Res
         "benign package {} submitted file set or bytes changed",
         package.pkgbase
     );
+    for file in &bundle.files {
+        validate_no_finding_kind_tokens(&package.pkgbase, &file.path, file.content.as_bytes())?;
+    }
     Ok(bundle)
 }
 
@@ -693,7 +696,7 @@ fn validate_static_fixture_contract(workspace: &Path, manifest: &CorpusManifest)
         }
         for file in &bundle.files {
             validate_no_literal_network_destination(&case.id, &file.path, &file.content)?;
-            validate_variable_names(&case.id, &file.path, &file.content)?;
+            validate_no_finding_kind_tokens(&case.id, &file.path, file.content.as_bytes())?;
             validate_worktree_mode(&case_root.join(&file.path)).with_context(|| {
                 format!(
                     "corpus case {} file {} has an unsafe mode",
@@ -958,95 +961,20 @@ fn validate_no_literal_network_destination(case_id: &str, file: &str, content: &
     Ok(())
 }
 
-fn validate_variable_names(case_id: &str, file: &str, content: &str) -> Result<()> {
-    let finding_labels = LlmFindingKind::ALL.map(kind_name);
-    for name in shell_variable_names(content) {
-        let lowercase = name.to_ascii_lowercase();
+fn validate_no_finding_kind_tokens(case_id: &str, file: &str, bytes: &[u8]) -> Result<()> {
+    let lowercase = bytes
+        .iter()
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    for token in LlmFindingKind::ALL.map(kind_name) {
         ensure!(
-            !["test", "fixture", "malicious", "evaluation"]
-                .iter()
-                .any(|forbidden| lowercase.contains(forbidden))
-                && !finding_labels
-                    .iter()
-                    .any(|finding_label| lowercase.contains(finding_label)),
-            "corpus case {case_id} file {file} uses forbidden benchmark-label variable {name}"
+            !lowercase
+                .windows(token.len())
+                .any(|window| window == token.as_bytes()),
+            "corpus case {case_id} file {file} contains forbidden benchmark label {token}"
         );
     }
     Ok(())
-}
-
-fn shell_variable_names(content: &str) -> BTreeSet<&str> {
-    let bytes = content.as_bytes();
-    let mut names = BTreeSet::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'$' {
-            let mut start = index + 1;
-            if bytes.get(start) == Some(&b'{') {
-                start += 1;
-            }
-            let mut end = start;
-            while bytes.get(end).is_some_and(|byte| is_shell_name_byte(*byte)) {
-                end += 1;
-            }
-            if end > start {
-                names.insert(&content[start..end]);
-            }
-            index = end;
-            continue;
-        }
-
-        if is_shell_name_start(bytes[index])
-            && (index == 0 || !is_shell_name_byte(bytes[index - 1]))
-        {
-            let start = index;
-            index += 1;
-            while bytes
-                .get(index)
-                .is_some_and(|byte| is_shell_name_byte(*byte))
-            {
-                index += 1;
-            }
-            let is_assignment = bytes.get(index) == Some(&b'=')
-                || (bytes.get(index) == Some(&b'+') && bytes.get(index + 1) == Some(&b'='));
-            if is_assignment {
-                names.insert(&content[start..index]);
-            }
-            continue;
-        }
-        index += 1;
-    }
-
-    for command in content.split(['\n', ';', '|', '&', '(', ')', '{', '}']) {
-        let mut words = command.trim_start().split_ascii_whitespace();
-        let Some(declaration) = words.next() else {
-            continue;
-        };
-        if !["local", "declare", "typeset", "readonly", "export"].contains(&declaration) {
-            continue;
-        }
-        for word in words {
-            if word.starts_with('-') {
-                continue;
-            }
-            let name_len = word
-                .bytes()
-                .take_while(|byte| is_shell_name_byte(*byte))
-                .count();
-            if name_len > 0 && is_shell_name_start(word.as_bytes()[0]) {
-                names.insert(&word[..name_len]);
-            }
-        }
-    }
-    names
-}
-
-fn is_shell_name_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || byte == b'_'
-}
-
-fn is_shell_name_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn validate_download_pair_behavior(bundles: &BTreeMap<&str, RecipeBundle>) -> Result<()> {
@@ -1527,36 +1455,46 @@ mod tests {
     }
 
     #[test]
-    fn direct_assignments_reject_every_finding_kind_as_a_substring() {
+    fn complete_fixture_bytes_reject_finding_kind_tokens_in_every_shell_form() {
         for kind in LlmFindingKind::ALL {
-            let variable = format!("prefix_{}_suffix", kind_name(kind));
-            let content = format!("{variable}=value\n");
-            assert!(
-                validate_variable_names("case", "PKGBUILD", &content).is_err(),
-                "accepted direct assignment {variable}"
-            );
+            let token = kind_name(kind);
+            for content in [
+                format!("prefix_{token}_suffix=value\n"),
+                format!("prefix_{token}_suffix=(one two)\n"),
+                format!("for prefix_{token}_suffix in one two; do :; done\n"),
+                format!("read prefix_{token}_suffix\n"),
+                format!("${{!prefix_{token}_suffix}}\n"),
+            ] {
+                assert!(
+                    validate_no_finding_kind_tokens("case", "PKGBUILD", content.as_bytes())
+                        .is_err(),
+                    "accepted finding-kind token in fixture bytes {content:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn shell_variable_definitions_and_assignments_are_all_scanned() {
+    fn complete_fixture_bytes_reject_case_variants_and_plain_prose() {
         for kind in LlmFindingKind::ALL {
-            let variable = format!("prefix_{}_suffix", kind_name(kind));
+            let token = kind_name(kind);
             for content in [
-                format!("export {variable}=value\n"),
-                format!("readonly {variable}=value\n"),
-                format!("declare -r {variable}=value\n"),
-                format!("typeset {variable}\n"),
-                format!(":; typeset {variable}\n"),
-                format!("local safe=value {variable}=value\n"),
-                format!("{variable}+=value\n"),
+                format!("# {}\n", token.to_ascii_uppercase()),
+                format!("This prose names prefix_{token}_suffix without shell syntax.\n"),
             ] {
                 assert!(
-                    validate_variable_names("case", "PKGBUILD", &content).is_err(),
-                    "accepted shell variable definition or assignment {content:?}"
+                    validate_no_finding_kind_tokens("case", "PKGBUILD", content.as_bytes())
+                        .is_err(),
+                    "accepted finding-kind token in fixture prose {content:?}"
                 );
             }
         }
+        assert!(validate_no_finding_kind_tokens(
+            "case",
+            "PKGBUILD",
+            b"pkgname=safe-package\npackage() { :; }\n"
+        )
+        .is_ok());
     }
 
     #[test]
