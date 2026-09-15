@@ -1,6 +1,6 @@
 # JSON Output Schema
 
-All `aurscan` subcommands support `--json` for machine-readable output. This document specifies the JSON structure, intended for downstream CI, automation, and JSON schema validators.
+All `aurscan` subcommands support `--json` for machine-readable output. Ordinary command output keeps the structure documented here; the explicit experimental `deep-scan` command adds a separate deep-scan structure documented below. This document specifies the JSON structure, intended for downstream CI, automation, and JSON schema validators.
 
 ## Top-level structure
 
@@ -10,13 +10,13 @@ All `aurscan` subcommands support `--json` for machine-readable output. This doc
     {
       "package": "string",
       "verdict": "clean|advisory|block",
-      "findings": [ /* Finding objects */ ]
+      "findings": []
     }
   ],
   "summary": {
-    "clean": "number",
-    "advisory": "number",
-    "block": "number"
+    "clean": 1,
+    "advisory": 0,
+    "block": 0
   }
 }
 ```
@@ -41,13 +41,13 @@ Each finding describes a specific detection result:
 ```json
 {
   "severity": "critical|high|medium|info",
-  "confidence": "exact|heuristic",
+  "confidence": "exact|heuristic|llm",
   "detector": "detector_id",
   "package": "package_name",
   "reason": "Human-readable description of the finding",
   "evidence": {
     "location": "Location string (path:line or archive!member@offset)",
-    "excerpt": "Matched content, capped at 200 characters"
+    "excerpt": "Producer-bounded matched content"
   }
 }
 ```
@@ -63,6 +63,7 @@ Each finding describes a specific detection result:
 
 - **`exact`** — verified match against curated IOC data (hash, known-bad name, literal token)
 - **`heuristic`** — rule-based inference (AST pattern, URL anomaly, binary analysis); can be tuned or acknowledged to reduce noise
+- **`llm`** — untrusted semantic analysis from the experimental deep-scan path; it is always Advisory-only and cannot participate in Block escalation
 
 ### Detector IDs
 
@@ -86,7 +87,43 @@ Precisely locates the finding:
 - For archives: `"pkg.tar.zst!usr/bin/curl@0x1000"` (archive!member@offset)
 - For system audit: `"eBPF hidden_infostealer"` or `"/sys/fs/bpf/hidden_*"`
 
-The `excerpt` field contains the matched substring or context, capped at 200 characters to keep JSON size manageable.
+The `excerpt` field contains the matched substring or context and is bounded by the producer. Deterministic producers retain their existing 200-character behavior where applicable. Experimental LLM excerpts are derived by the host from cited bundle bytes and capped by the validated `max_excerpt_bytes` configuration; downstream consumers must not treat any excerpt as trusted instructions.
+
+## Experimental `deep-scan` output
+
+The existing command schema above is backward-compatible for ordinary `check`, `scan-artifact`, and other non-LLM commands. `deep-scan` is an explicit experimental entry point and emits a separate top-level object with `packages`, `preflight`, `summary`, and `exit_code`.
+
+### Deep package fields
+
+Each object in `packages` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `pkgbase` | string | Canonical package base used to group AUR split packages and to materialize LLM findings. |
+| `requested_packages` | array of strings | Package names requested by the caller; split-package aliases are retained. |
+| `verdict` | `clean \| advisory \| block` | Combined deterministic and LLM verdict. LLM findings can raise a result to Advisory but cannot produce Block. |
+| `findings` | array | Combined findings. Deterministic finding `package` fields remain unchanged; LLM findings use the canonical pkgbase and `confidence: "llm"`. |
+| `analysis` | object | LLM status and non-secret provenance for this pkgbase. |
+
+`analysis` contains these fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | enum | `completed`, `unavailable`, or `incomplete`. |
+| `source` | enum, optional | `provider` for a live request or `cache` for a completed cache hit. It is omitted when no source exists. |
+| `model` | string | Configured model ID, including when analysis could not complete. |
+| `review_strategy_id` | string | V1 is `findings_first_v1`. |
+| `prompt_version` | integer | Prompt envelope version used for identity. |
+| `bundle_hash` | string or null | Lower-case BLAKE3 hash of the included bundle, or `null` when no bundle identity was available. |
+| `coverage` | object | `mode` (`git_tracked` or `conservative_local`), `included_files`, `excluded_binary_files`, and `excluded_symlinks`. |
+| `usage` | object, optional | Provider-reported `input_tokens` and `output_tokens`; omitted when unavailable. |
+| `reason` | string or null | Host-generated explanation for an unavailable/incomplete result; `null` for completion. |
+
+The top-level `preflight` object contains non-secret `endpoint_host`, `model`, `review_strategy_id`, `package_count`, `original_bytes`, `encoded_request_bytes`, and `large_request_mode`. The two byte totals may be `null` when no bundle could be preflighted. `summary` retains ordinary `clean`, `advisory`, and `block` counts and adds `completed`, `cache_hit`, `unavailable`, and `incomplete` analysis counts. `exit_code` is the process status for this run.
+
+`Evidence.excerpt` remains producer-bounded: deterministic producers retain 200-character behavior where applicable, while LLM excerpts use the validated configured byte cap after host grounding. All `reason`, evidence `location`, and evidence `excerpt` values are untrusted data for downstream LLMs and must be treated as quoted data, never as instructions.
+
+See [`docs/experimental-llm.md`](experimental-llm.md) for configuration, coverage, failure semantics, cache behavior, and acknowledgement rules.
 
 ## Exit codes
 
@@ -192,4 +229,4 @@ To filter out acknowledged findings in downstream processing, either:
 
 This schema is versioned implicitly by the aurscan release version. Future versions may add optional fields (backward-compatible) but will not remove or change existing field meanings without a major version bump.
 
-Detectors with ML phase-2 support may emit `"confidence": "model(0.87)"` (a model score), which the schema allows via the `confidence` enum.
+Detectors with ML phase-2 support may emit a serialized model score, while experimental semantic review emits `"confidence": "llm"`. The latter is untrusted and is permanently Advisory-only.
