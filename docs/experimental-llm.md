@@ -35,7 +35,7 @@ This is recipe review only. V1 does not inspect upstream source repositories, ve
 V1 uses the `findings_first_v1` strategy:
 
 1. The host supplies a trusted review rubric and one host-generated manifest containing the bounded file list and limits.
-2. The host sends one raw text user message per file. Each message labels the normalized relative path and states where line 1 begins.
+2. The host sends one raw text user message per file. Each message labels the normalized relative path and states where line 1 begins. Immediately afterward, a paired host-generated physical-line view labels the original LF-delimited lines and JSON-encodes their full text, retaining carriage returns. Empty files have no rows and a terminal newline adds no phantom row. Both raw content and row values remain untrusted source data; only original files count toward the manifest and bundle identity.
 3. The model returns only the strict candidate findings object. It has no tools and cannot read the host, run commands, change files, contact a second service, or set a verdict.
 4. The host validates each cited file and line range against the bundle, derives the evidence excerpt from the cited bytes, and maps the model's finding kind to a host-controlled detector ID.
 5. The host materializes accepted findings with `confidence: "llm"` and merges them with deterministic findings.
@@ -215,7 +215,7 @@ Existing command JSON remains backward-compatible. Deep scanning has a separate 
           "mode": "conservative_local"
         },
         "model": "doc-fake-model",
-        "prompt_version": 3,
+        "prompt_version": 4,
         "reason": null,
         "review_strategy_id": "findings_first_v1",
         "source": "provider",
@@ -306,7 +306,7 @@ These controls do not make detection complete. Prompt injection, ambiguous behav
 
 ## Qualification status
 
-The current candidate uses prompt v3, response schema v1, analysis epoch 1, and `findings_first_v1`. Prompt v3 adds general finding-kind definitions, phase-aware staging and payload review, and minimally sufficient bounded citations. Its version and complete envelope hash invalidate prompt v2 cache entries; unchanged v3 requests can reuse completed entries. Request profiles, host grounding, corpus labels, scoring, and thresholds are unchanged. Offline request and cache tests establish these host contracts; prompt v3 has not yet undergone live calibration or qualification.
+The current candidate uses prompt v4, response schema v1, analysis epoch 1, and `findings_first_v1`. Prompt v4 adds paired raw-file and physical-line views for evidence navigation while preserving v3's taxonomy, phase, purpose, and bounded-citation rules. Its version and complete envelope hash invalidate prompt v3 cache entries; unchanged v4 requests can reuse completed entries. Request profiles, host grounding, scoring, and thresholds are unchanged. The full encoded request includes the added views: a raw bundle that previously fit may now exceed `max_request_bytes` and be rejected before any provider call. The host never raises limits, truncates the views, or falls back to an older format. Offline request and cache tests establish these host contracts; prompt v4 has not yet undergone live calibration or qualification.
 
 No tested model currently satisfies the frozen v1 qualification bar. The direct OpenAI `gpt-5.6-sol` example above demonstrates wire compatibility only; it does not say that model is qualified.
 

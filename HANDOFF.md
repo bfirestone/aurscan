@@ -80,7 +80,7 @@ Independent source-only adjudication found that the encoded, guarded preparation
 
 Implementation `0f2869819b6d42d7610c61fb0f6e75ac0ffc93c1` passed independent code review (ADHERENT), specification review (COMPLIANT), and isolated loader acceptance (native contract accepted, 18 forbidden mutations rejected). All61 fixture hashes and all three historical diagnostic hashes are unchanged. The root independently reran the locked workspace suite:426 top-level passes plus1 nested invocation,3 intentional skips. Formatting, warnings-denied locked Clippy, locked build and diff checks passed. The actual promotion regression rejects a self-consistent prior-contract artifact before key/provider callbacks; this private path is covered by source review and regression execution, outside the isolated evaluator's public loader coverage.
 
-The signed correction is accepted and published. Arc `.1.9.10.1` records full durable evidence. Next implement `.1.9.10.2` under the exact safe parent design `.1.9.10`: preserve raw file messages and add versioned JSON-encoded physical-line views. A fresh builder must receive no independent holdout contents or per-case adjudication. The holdout adapter `.1.9.8` remains separate offline work awaiting revised-design acceptance. No new provider operation is authorized: prompt4 needs independent offline acceptance, publication, exact encoded-size preview and explicit candidate/stage approval. Full57 qualification and independent24-case holdout remain unexecuted; the quality goal is unmet.
+The signed correction is accepted and published. Arc `.1.9.10.1` records full durable evidence. Next implement `.1.9.10.2` under the exact safe parent design `.1.9.10`: preserve raw file messages and add versioned JSON-encoded physical-line views. A fresh builder must receive no independent holdout contents or per-case adjudication. The holdout adapter `.1.9.8` design is accepted; external implementation and independent offline verification remain open. No new provider operation is authorized: prompt4 needs independent offline acceptance, publication, exact encoded-size preview and explicit candidate/stage approval. Full57 qualification and independent24-case holdout remain unexecuted; the quality goal is unmet.
 
 ### Diagnostic correction `.1.9.6`
 
@@ -102,6 +102,12 @@ Prompt3 is **unqualified**. No real provider, user configuration, or credential 
 
 The frozen 17-case calibration is a promotion gate; only a pass permits the frozen 57-case qualification under the same identity. They share seven malicious/injection cases and do not establish all-eight-kind coverage or generalization. The benign Advisory metric ignores Info findings, and kind/start-line hits do not establish reason correctness. Passing those gates is necessary; the owner's high-quality completion claim also requires the independent assessment. Record each live stage's scope before invocation, with no retry or profile fallback. Do not repeat an unchanged failed candidate to seek success. A holdout used to diagnose a failure is no longer unseen for the next candidate.
 
+## Prompt4 physical-line presentation candidate
+
+Task `.1.9.10.2` adds one deterministic physical-line view immediately after each unchanged raw file message. JSON row values preserve LF-delimited source slices, including CR, blank lines and Unicode; empty files have no rows and terminal LF adds no phantom row. Prompt v4 changes only evidence navigation from v3 and versions the full envelope hash. Profile fingerprints, grounding, response schema and prior prompt files stay unchanged. The augmented encoded request can exceed an existing byte cap; rejection occurs before credentials or provider access, without truncation or fallback.
+
+Public Analyzer tests cover both profiles, raw/map order and exact bytes, literal physical-line edges and original grounded excerpts, historical prompt3 cache misses and prompt4 reopen hits, and exact preflight/body size with map-induced zero-provider rejection. This remains an offline candidate pending root verification and independent acceptance/publication. No provider run or model-quality improvement is established.
+
 ## Non-Negotiable Product Contracts
 
 - LLM scanning remains experimental, explicit, and off by default.
@@ -112,7 +118,7 @@ The frozen 17-case calibration is a promotion gate; only a pass permits the froz
 - Credentials come only from the configured environment-variable name; never store or print the key.
 - Remote use requires explicit consent and may transmit public recipe bytes plus tracked local modifications.
 - Provider requests are sequential with no retry or profile fallback.
-- Current prompt v3 changes the prompt envelope and cache identity. Response schema v1, analysis epoch 1, `findings_first_v1`, expected finding kinds, scoring, and frozen release thresholds remain unchanged.
+- Current prompt v4 changes the prompt envelope and cache identity. Response schema v1, analysis epoch 1, `findings_first_v1`, expected finding kinds, scoring, and frozen release thresholds remain unchanged.
 - Upstream-source analysis and the shared Go/Echo cache remain deferred.
 
 ## Approved Design
@@ -247,7 +253,7 @@ The following restrictions applied to the foundation and diagnostic implementati
 - Do **not** describe any model as qualified.
 - Do **not** expose, print, hash, or commit `OPENAI_API_KEY`.
 
-Those failed prompt2 runs used `gpt-5.6-sol` with `request_profile = "openai_reasoning_none"`. The current prompt3 candidate preserves that model and profile. Each live stage requires its recorded operational scope, fresh configuration/consent checks, and the existing no-retry safeguards. Diagnostic implementation itself performed no provider operation or credential/config access.
+Those failed prompt2 runs used `gpt-5.6-sol` with `request_profile = "openai_reasoning_none"`. The current prompt4 candidate preserves that model and profile. Each live stage requires its recorded operational scope, fresh configuration/consent checks, and the existing no-retry safeguards. Diagnostic implementation itself performed no provider operation or credential/config access.
 
 ## Diagnostic Correction Quality Evidence
 

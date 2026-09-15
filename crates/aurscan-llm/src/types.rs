@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const PROVIDER_PROTOCOL_VERSION: u16 = 1;
-pub const PROMPT_VERSION: u32 = 3;
+pub const PROMPT_VERSION: u32 = 4;
 pub const RESPONSE_SCHEMA_VERSION: u16 = 1;
 pub const LLM_ANALYSIS_EPOCH: u32 = 1;
 pub const REVIEW_STRATEGY_ID: &str = "findings_first_v1";

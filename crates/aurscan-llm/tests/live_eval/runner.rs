@@ -152,7 +152,7 @@ struct ReferenceCaseResult {
 }
 
 pub(crate) fn offline_contract() -> Result<()> {
-    ensure!(PROMPT_VERSION == 3, "prompt version changed");
+    ensure!(PROMPT_VERSION == 4, "prompt version changed");
     ensure!(
         RESPONSE_SCHEMA_VERSION == 1,
         "response schema version changed"

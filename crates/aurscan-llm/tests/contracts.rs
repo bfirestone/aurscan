@@ -57,7 +57,7 @@ fn request_profile_and_versions_are_stable() {
         serde_json::to_string(&ChatCompletionsProfile::OpenAiReasoningNone).unwrap(),
         "\"openai_reasoning_none\""
     );
-    assert_eq!(PROMPT_VERSION, 3);
+    assert_eq!(PROMPT_VERSION, 4);
     assert_eq!(PROVIDER_PROTOCOL_VERSION, 1);
     assert_eq!(RESPONSE_SCHEMA_VERSION, 1);
     assert_eq!(LLM_ANALYSIS_EPOCH, 1);
