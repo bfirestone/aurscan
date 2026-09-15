@@ -56,7 +56,7 @@ New local diagnostics use **schema2** with required `candidate_count` and `failu
 
 The schema-forgery oracle now describes guarded creation/truncation of an empty privileged file under `/etc/cron.d` from `/dev/null`. No functional cron schedule is installed. Fixture bytes, expected kinds, and evidence ranges remain unchanged; the corrected oracle naturally changes oracle and analysis-contract hashes, invalidating old promotion identity. Model response schema1, prompt2, epoch1, profile wire semantics, and thresholds remain unchanged.
 
-Offline implementation gates have passed; independent acceptance and publication remain pending. This handoff does not predeclare task closure. Another paid calibration requires a new approved design plus explicit owner authorization. Qualification additionally requires a valid passed preflight and separate authorization. New model-facing taxonomy, prompts, model/profile choices, and tuning remain future design work.
+Implementation `3c255eb47846de0b903f7ad263482acd5d89fd35` passed independent code review (ADHERENT), specification review (COMPLIANT), and 11 isolated evaluator-authored tests. The orchestrator independently reran the workspace suite. Arc `.1.9.6` records final publication and closure evidence. Another paid calibration requires a new approved design plus explicit owner authorization. Qualification additionally requires a valid passed preflight and separate authorization. New model-facing taxonomy, prompts, model/profile choices, and tuning remain future design work.
 
 ## Non-Negotiable Product Contracts
 
@@ -98,7 +98,7 @@ The approved sequence is:
 | `aurscan-0qag.01vn62.1.9` | **open** | Remediation epic | Keep open while operational work/T4 remain unresolved |
 | `aurscan-0qag.01vn62.1.9.3` | **closed**, `high-risk` | Correct oracle and land modular promotion harness | Accepted and published at `3807dd4`; dependency satisfied |
 | `aurscan-0qag.01vn62.1.9.4` | **blocked**, `devops` | Rejected paid 17-case promotion preflight | 1/7 strict hits and 1 incomplete; new design and authorization required before another run |
-| `aurscan-0qag.01vn62.1.9.6` | in progress | Diagnostic fidelity and oracle correction | Offline implementation; independent acceptance and publication pending |
+| `aurscan-0qag.01vn62.1.9.6` | independently accepted | Diagnostic fidelity and oracle correction | Accepted at `3c255eb`; see Arc for publication and closure evidence |
 | `aurscan-0qag.01vn62.1.5` | blocked, `devops` | One conditional 57-case qualification and accepted report | Depends on `.1.9.4`; do not run |
 | `aurscan-0qag.01vn62.1.7` | **closed**, `docs-only` | Experimental LLM usage documentation | Completed at `ef538d3` |
 | `aurscan-0qag.01vn62.1.9.5` | open, `docs-only` | Accepted reference-metrics addendum | Depends on T4 and docs; do not write yet |
@@ -209,7 +209,7 @@ The rejected candidate was `gpt-5.6-sol` with `request_profile = "openai_reasoni
 
 The correction's offline gates passed with 101 focused tests (28 analyzer, 12 grounding, 61 harness; 2 live tests ignored), and 420 top-level workspace tests plus one nested subprocess pass (3 intentionally ignored). `cargo fmt --check`, warnings-denied locked workspace Clippy, locked workspace build, and diff checks passed. Evidence is retained under `/tmp/arc-diagnostic-fixes._ejne3z7/`. Local mock TCP and Unix-socket tests required sandbox escalation; no live provider operation or fixture execution occurred.
 
-The RED harness tests reproduced excerpt-derived end-line loss, lack of schema2 support, and genuine schema1 promotion reaching the credential/provider boundary. The corrected tests now pass. Classification tests exercise source-origin failures, original candidate indexes, simultaneous non-stop/grounding failures, clipped-span provider/cache parity, strict schema roundtrips, and pre-key rejection. Request-encoding failure remains mapped at its existing branch; the current host-only serializer has no injectable failure path without changing request code. Independent specification, code, and adversarial acceptance of this revision must precede task closure.
+The RED harness tests reproduced excerpt-derived end-line loss, lack of schema2 support, and genuine schema1 promotion reaching the credential/provider boundary. The corrected tests now pass. Classification tests exercise source-origin failures, original candidate indexes, simultaneous non-stop/grounding failures, clipped-span provider/cache parity, strict schema roundtrips, and pre-key rejection. Request-encoding failure remains mapped at its existing branch; the current host-only serializer has no injectable failure path without changing request code. Independent specification and code reviews accepted `3c255eb` without findings. All 11 isolated evaluator-authored tests passed. The evaluator covered public analyzer and diagnostic-validator behavior; private promotion counters and span/scoring consumers were checked by source review and the freshly passing regression suite. Request-encoding failure remains source-reviewed only. The orchestrator rechecked the rejected diagnostic digest and existing stashes unchanged. Review/test records remain in the evidence directory above; Arc preserves the durable completion summary.
 
 ## Historical Foundation Quality Evidence
 
