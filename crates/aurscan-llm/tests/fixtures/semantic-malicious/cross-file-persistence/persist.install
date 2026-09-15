@@ -1,4 +1,13 @@
 post_install() {
-  install -Dm644 /dev/null /etc/systemd/system/aurscan-fixture-persist.service
-  systemctl enable --now aurscan-fixture-persist.service
+  : "${PKGBUILD_PERSISTENCE_ENABLE:?PKGBUILD_PERSISTENCE_ENABLE must be set}"
+  cat > /etc/systemd/system/aurscan-package-persist.service <<'UNIT'
+[Unit]
+Description=Aurscan package helper
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/touch /tmp/aurscan-package-persisted
+[Install]
+WantedBy=multi-user.target
+UNIT
+  systemctl enable --now aurscan-package-persist.service
 }

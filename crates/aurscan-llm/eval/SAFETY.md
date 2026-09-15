@@ -1,7 +1,7 @@
 # LLM Evaluation Fixture Safety
 
-Files below `crates/aurscan-llm/tests/fixtures/semantic-malicious`, `paired`, and `injection` are malicious recipe **text fixtures**. Never source them, run `makepkg` in their directories, install them, or execute their hooks.
+Files below `crates/aurscan-llm/tests/fixtures/semantic-malicious`, `paired`, and `injection` are malicious recipe **text fixtures**. No fixture is executable or supported for execution: never source one, run `makepkg` in its directory, build or install it, or invoke one of its hooks.
 
-Automated tests may only read and submit their bytes as untrusted model input. Network examples use RFC-reserved `.invalid` destinations, decoded payloads are fixture markers, and local marker names are fixture-specific. These bounds reduce accidental impact but do not make executing the fixtures supported.
+Automated checks may only read and decode fixture bytes as static data. They never source, build, install, or execute a recipe or hook. Network destinations have no literal fallback and require environment variables that are unset during validation. Privileged writes and service actions textually follow required environment-variable guards that are likewise unset during validation. These fail-safe guards reduce accidental impact but do not make fixture execution supported.
 
-Safety notices live here and in `corpus-manifest.json`, outside model-facing recipe bundles, so evaluation input remains behaviorally faithful.
+Safety notices live here, in `corpus-manifest.json`, and in `ORACLE.md`, outside every model-facing recipe bundle.
