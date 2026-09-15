@@ -16,8 +16,9 @@ session's own session ID. Foundation aurscan-0qag.01vn62.1.9.3 is accepted,
 published, and closed at implementation commit 3807dd4 under approved
 plan.056dgb. Read its completion evidence and permanent parent design
 aurscan-0qag.01vn62.1.9, which remains open. Read the latest rejected promotion-preflight task aurscan-0qag.01vn62.1.9.4 and diagnostic
-correction task aurscan-0qag.01vn62.1.9.6, then current prompt3 task
-aurscan-0qag.01vn62.1.9.7. The owner's persistent quality goal authorizes bounded
+correction task aurscan-0qag.01vn62.1.9.6, then prompt3 task
+aurscan-0qag.01vn62.1.9.7 and accepted oracle correction .1.9.10.1. Next
+implementation is .1.9.10.2 under safe parent .1.9.10. The owner's persistent quality goal authorizes bounded
 iteration under the latest stored design. Read the prompt3 status below before
 continuing: live quality remains unverified and failed prompt2 runs remain history.
 ```
@@ -71,7 +72,15 @@ After explicit approval of prompt3 corpus egress to OpenAI, exactly one calibrat
 - Root independently validated schema2, identity/selection, all six retained spans, status/candidate/failure accounting and aggregate quality metrics. Request/cache counts were checked for consistency, not independently observed network sends. Usage31243 input/842 output includes copied cache usage and is not a billing total. Total case latency27141ms; test duration27.33s; exit101 reflects threshold rejection.
 - Fresh contract, fmt, warnings-denied harness Clippy and workspace421 top-level plus1 nested test passed (3 intentional skips). All150 prior run artifacts, both earlier diagnostics, config metadata, stashes and repository state remained unchanged during execution. Private diagnostic mode0600 and empty temporary cache root verified.
 
-This candidate is unqualified. The next design must address physical-line citation reliability and independently examine the kind mismatch without adjusting the frozen oracle to fit this output. Do not rerun unchanged prompt3. The independent holdout stays unseen by the evaluated candidate; its adapter/private-evidence design is being reviewed separately, with no model call.
+This candidate is unqualified. The independently reviewed next design addresses physical-line citation reliability; the separate source-adjudicated oracle correction below preserves this historical result. Do not rerun unchanged prompt3. The independent holdout stays unseen by the evaluated candidate; its adapter/private-evidence design is being reviewed separately, with no model call.
+
+### Separately versioned oracle correction `.1.9.10.1`
+
+Independent source-only adjudication found that the encoded, guarded preparation-phase absolute write supports `build_install_boundary`; the existing `other_semantic` alternative was unsupported. The separate revision3 manifest replaces only that alternative, preserving `obfuscated_execution`, every fixture byte, all other labels, evidence ranges and thresholds. ORACLE.md records the source judgement and guard/permission/namespace limits. This cannot validate the missing historical model reason or turn the historical 4/7 result into a pass.
+
+Implementation `0f2869819b6d42d7610c61fb0f6e75ac0ffc93c1` passed independent code review (ADHERENT), specification review (COMPLIANT), and isolated loader acceptance (native contract accepted, 18 forbidden mutations rejected). All61 fixture hashes and all three historical diagnostic hashes are unchanged. The root independently reran the locked workspace suite:426 top-level passes plus1 nested invocation,3 intentional skips. Formatting, warnings-denied locked Clippy, locked build and diff checks passed. The actual promotion regression rejects a self-consistent prior-contract artifact before key/provider callbacks; this private path is covered by source review and regression execution, outside the isolated evaluator's public loader coverage.
+
+The signed correction is accepted and published. Arc `.1.9.10.1` records full durable evidence. Next implement `.1.9.10.2` under the exact safe parent design `.1.9.10`: preserve raw file messages and add versioned JSON-encoded physical-line views. A fresh builder must receive no independent holdout contents or per-case adjudication. The holdout adapter `.1.9.8` remains separate offline work awaiting revised-design acceptance. No new provider operation is authorized: prompt4 needs independent offline acceptance, publication, exact encoded-size preview and explicit candidate/stage approval. Full57 qualification and independent24-case holdout remain unexecuted; the quality goal is unmet.
 
 ### Diagnostic correction `.1.9.6`
 
