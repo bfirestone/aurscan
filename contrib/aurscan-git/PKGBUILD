@@ -13,7 +13,7 @@ pkgname=aurscan-git
 # makepkg rewrites the pkgver= line below on every build (VCS packages
 # regenerate it via pkgver()). The resulting diff is noise; discard it with
 # `git checkout -- contrib/aurscan-git/PKGBUILD` or commit it, either is fine.
-pkgver=0.2.2.r1.gc700fdb
+pkgver=0.2.3.r9.gdb89af6
 pkgrel=1
 pkgdesc="High-performance AUR package scanner (development build from local git)"
 arch=('x86_64')
