@@ -8,16 +8,18 @@
 # The asset job builds the tarball that PKGBUILD downloads. It uses `git
 # archive` and runs makepkg on that tarball in a clean Arch container. The
 # publish job attests the tarball and uploads it to the draft. Then it
-# publishes the release and pushes the checksum pin to main. With release
-# immutability on, the published asset can't change after that. PKGBUILD
-# pins sha256sums to this uploaded tarball, not GitHub's on-the-fly tag
-# archive, because the uploaded file is a fixed byte string.
+# publishes the release and lands the checksum pin on main through a PR.
+# With release immutability on, the published asset can't change after
+# that. PKGBUILD pins sha256sums to this uploaded tarball, not GitHub's
+# on-the-fly tag archive, because the uploaded file is a fixed byte string.
 #
-# Bot pushes use a GitHub App token when RELEASE_APP_CLIENT_ID and
-# RELEASE_APP_PRIVATE_KEY are configured. Otherwise they fall back to
-# GITHUB_TOKEN, whose pushes don't trigger CI on the release PR or the pin
-# commit. Tags made with GITHUB_TOKEN don't trigger other workflows either,
-# which is why the asset jobs live here.
+# main requires PRs and verified signatures, so bot commits go through the
+# GraphQL API, which GitHub signs (.github/scripts/signed-commit.sh). They use
+# a GitHub App token when RELEASE_APP_CLIENT_ID and RELEASE_APP_PRIVATE_KEY
+# are configured. Otherwise they fall back to GITHUB_TOKEN, whose commits
+# don't trigger CI on the release PR or the pin PR. Tags made with
+# GITHUB_TOKEN don't trigger other workflows either, which is why the asset
+# jobs live here.
 name: Release
 
 on:
@@ -71,7 +73,7 @@ jobs:
     if: needs.release-please.outputs.pr != ''
     runs-on: ubuntu-latest
     permissions:
-      contents: write # push to the release PR branch
+      contents: write # commit to the release PR branch
     env:
       PR_JSON: ${{ needs.release-please.outputs.pr }}
     steps:
@@ -95,9 +97,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.BRANCH }}
-          token: ${{ steps.app.outputs.token || github.token }}
-          # The push below needs the token. Nothing in this job builds code.
-          persist-credentials: true # zizmor: ignore[artipacked]
+          persist-credentials: false
 
       - name: Sync Cargo.lock
         run: cargo update --workspace
@@ -113,17 +113,20 @@ jobs:
             bash -c 'useradd -m builder && cp -r /in /home/builder/b && chown -R builder:builder /home/builder/b && su builder -c "cd ~/b && makepkg --printsrcinfo"' \
             > .SRCINFO
 
-      - name: Push fixups to the release PR
+      # The release PR's commits land on main, which requires verified
+      # signatures, so the fixup goes through the API instead of git push.
+      - name: Commit fixups to the release PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          if git diff --quiet; then
+          mapfile -t changed < <(git diff --name-only)
+          if [ "${#changed[@]}" -eq 0 ]; then
             echo "Cargo.lock and .SRCINFO already in sync."
             exit 0
           fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.lock .SRCINFO
-          git commit -m "chore: sync Cargo.lock and .SRCINFO"
-          git push origin "HEAD:$BRANCH"
+          .github/scripts/signed-commit.sh "$BRANCH" "$(git rev-parse HEAD)" \
+            "chore: sync Cargo.lock and .SRCINFO" "${changed[@]}"
 
   asset:
     name: build and verify the release asset
@@ -192,7 +195,8 @@ jobs:
     needs: [release-please, asset]
     runs-on: ubuntu-latest
     permissions:
-      contents: write # upload the asset, publish the release, push the pin
+      contents: write # upload the asset, publish the release, commit the pin
+      pull-requests: write # open and merge the pin PR
       id-token: write # sign the provenance attestation
       attestations: write # store the provenance attestation
     env:
@@ -242,12 +246,15 @@ jobs:
         with:
           ref: main
           path: repo
-          token: ${{ steps.app.outputs.token || github.token }}
-          # The push below needs the token. Nothing in this job builds code.
-          persist-credentials: true # zizmor: ignore[artipacked]
+          persist-credentials: false
 
-      - name: Pin the checksum on main
+      # main requires a PR and verified signatures. The pin goes on its own
+      # branch as an API commit, which GitHub signs. A squash merge then
+      # lands it on main as another GitHub-signed commit.
+      - name: Pin the checksum through a PR
         working-directory: repo
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
         run: |
           sha=$(cut -d' ' -f1 "../dist/aurscan-$VER.tar.gz.sha256")
           pkg_ver=$(sed -n 's/^pkgver=\([^ ]*\).*/\1/p' PKGBUILD)
@@ -263,11 +270,21 @@ jobs:
           sed -i "s/$old/$sha/" PKGBUILD .SRCINFO
           grep -qx "sha256sums=('$sha')" PKGBUILD
           grep -qx "	sha256sums = $sha" .SRCINFO
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add PKGBUILD .SRCINFO
-          git commit -m "build(pkgbuild): point at the $TAG release asset"
-          git push origin HEAD:main
+
+          pin="release-pin/$TAG"
+          title="build(pkgbuild): point at the $TAG release asset"
+          head=$(git rev-parse HEAD)
+          if ! gh api "repos/$GH_REPO/git/ref/heads/$pin" >/dev/null 2>&1; then
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$pin" -f sha="$head" >/dev/null
+            .github/scripts/signed-commit.sh "$pin" "$head" "$title" PKGBUILD .SRCINFO
+          fi
+          if [ "$(gh pr view "$pin" --json state -q .state 2>/dev/null)" != "OPEN" ]; then
+            gh pr create --base main --head "$pin" --title "$title" \
+              --body "Pins \`sha256sums\` to the published $TAG asset: \`$sha\`."
+          fi
+          if ! gh pr merge "$pin" --squash --delete-branch; then
+            echo "::warning::The pin PR couldn't be merged automatically. Merge it by hand."
+          fi
 
       - name: Summary
         run: |

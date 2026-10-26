@@ -110,12 +110,14 @@ drill from `.github/workflows/release.yml`:
 3. The same workflow builds the `git archive` tarball and runs `makepkg`
    against it in a clean Arch container. Then it uploads the tarball to the
    release.
-4. It pushes `build(pkgbuild): point at the vX.Y.Z release asset` to `main`
-   with the pinned sha256.
+4. It opens `build(pkgbuild): point at the vX.Y.Z release asset` from a
+   `release-pin/vX.Y.Z` branch and squash-merges it.
 
-The repo setting *Allow GitHub Actions to create and approve pull requests*
-must be on, or step 1 fails. The bot's commits are made with `GITHUB_TOKEN`,
-so CI doesn't run on the release PR or on the pin commit.
+`main` requires PRs and verified signatures. The workflow makes its commits
+through the GraphQL `createCommitOnBranch` mutation, which GitHub signs. The
+repo setting *Allow GitHub Actions to create and approve pull requests* must
+be on, or steps 1 and 4 fail. Without the optional GitHub App, the bot works
+as `GITHUB_TOKEN`, so CI doesn't run on the release PR or the pin PR.
 
 Then:
 
