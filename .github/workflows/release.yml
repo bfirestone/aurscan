@@ -70,25 +70,21 @@ jobs:
   # release-please bumps Cargo.toml and PKGBUILD but can't compute the derived
   # files. Without this, `cargo --locked`, the .SRCINFO consistency check and
   # the asset's checksum check all fail on every release.
+  #
+  # It runs on every push, not only when release-please touched the PR.
+  # release-please leaves its `pr` output empty when the PR "remained the
+  # same", yet main can still have moved underneath the release branch.
   release-pr-sync:
     name: sync Cargo.lock, checksum and .SRCINFO on the release PR
     needs: release-please
-    if: needs.release-please.outputs.pr != ''
+    if: needs.release-please.outputs.release_created != 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write # commit to the release PR branch
+      pull-requests: write # find the release PR and update its branch
     env:
-      PR_JSON: ${{ needs.release-please.outputs.pr }}
+      GH_REPO: ${{ github.repository }}
     steps:
-      - name: Read the release branch name
-        run: |
-          branch=$(printf '%s' "$PR_JSON" | jq -r '.headBranchName')
-          if ! [[ "$branch" =~ ^release-please--[A-Za-z0-9._/-]+$ ]]; then
-            echo "::error::Unexpected release branch name '$branch'"
-            exit 1
-          fi
-          echo "BRANCH=$branch" >> "$GITHUB_ENV"
-
       - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         id: app
         if: vars.RELEASE_APP_CLIENT_ID != ''
@@ -96,19 +92,65 @@ jobs:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
           private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           permission-contents: write
+          permission-pull-requests: write
+
+      - name: Find the open release PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+        run: |
+          pr=$(gh pr list --state open --label 'autorelease: pending' \
+            --json number,headRefName -q '.[0] // empty | "\(.number) \(.headRefName)"')
+          if [ -z "$pr" ]; then
+            echo "No open release PR."
+            exit 0
+          fi
+          read -r number branch <<< "$pr"
+          if ! [[ "$branch" =~ ^release-please--[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::Unexpected release branch name '$branch'"
+            exit 1
+          fi
+          echo "PR_NUMBER=$number" >> "$GITHUB_ENV"
+          echo "BRANCH=$branch" >> "$GITHUB_ENV"
+
+      # The squash merge tags main plus this branch's changes. Merging main
+      # into the branch first makes its tree that exact tree, so the checksum
+      # pinned below matches the tag. GitHub makes and signs the merge commit.
+      - name: Bring the release branch up to date with main
+        if: env.BRANCH != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+        run: |
+          behind() { gh api "repos/$GH_REPO/compare/$BRANCH...main" -q .ahead_by; }
+          if [ "$(behind)" -eq 0 ]; then
+            echo "$BRANCH already contains main."
+            exit 0
+          fi
+          echo "$BRANCH is behind main. Merging main in."
+          gh api -X PUT "repos/$GH_REPO/pulls/$PR_NUMBER/update-branch" >/dev/null
+          for _ in $(seq 30); do
+            sleep 2
+            if [ "$(behind)" -eq 0 ]; then
+              exit 0
+            fi
+          done
+          echo "::error::$BRANCH didn't catch up with main within a minute"
+          exit 1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.BRANCH != ''
         with:
           ref: ${{ env.BRANCH }}
           persist-credentials: false
 
       - name: Sync Cargo.lock
+        if: env.BRANCH != ''
         run: cargo update --workspace
 
       # The tag's tree will be this branch's tree after the fixup commit. The
       # tarball excludes PKGBUILD and .SRCINFO, so staging Cargo.lock is
       # enough to archive that tree before the commit exists.
       - name: Pin the release tarball checksum
+        if: env.BRANCH != ''
         run: |
           ver=$(sed -n 's/^pkgver=\([^ ]*\).*/\1/p' PKGBUILD)
           git add Cargo.lock
@@ -121,6 +163,7 @@ jobs:
       # makepkg --printsrcinfo sources the PKGBUILD, so it gets only the
       # packaging files, mounted read-only.
       - name: Regenerate .SRCINFO
+        if: env.BRANCH != ''
         run: |
           docker run --rm \
             -v "$PWD/PKGBUILD:/in/PKGBUILD:ro" \
@@ -132,6 +175,7 @@ jobs:
       # The release PR's commits land on main, which requires verified
       # signatures, so the fixup goes through the API instead of git push.
       - name: Commit fixups to the release PR
+        if: env.BRANCH != ''
         env:
           GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
           GH_REPO: ${{ github.repository }}

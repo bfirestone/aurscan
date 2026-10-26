@@ -105,10 +105,11 @@ drill from `.github/workflows/release.yml`:
 1. Every push to `main` updates a release PR. Conventional commit types pick
    the version bump. The PR bumps `Cargo.toml` and `PKGBUILD` (the
    `x-release-please-version` marker) and updates `CHANGELOG.md`.
-2. A follow-up job on the PR branch syncs `Cargo.lock` and pins the release
-   tarball's sha256 in `PKGBUILD`. Then it regenerates `.SRCINFO`. The
-   tarball is reproducible (`.github/scripts/release-tarball.sh`) and leaves
-   out `PKGBUILD` and `.SRCINFO`, so the checksum is known before the tag.
+2. On every push, a follow-up job merges `main` into the release PR's
+   branch. It syncs `Cargo.lock` and pins the release tarball's sha256 in
+   `PKGBUILD`, then regenerates `.SRCINFO`. The tarball is reproducible
+   (`.github/scripts/release-tarball.sh`) and leaves out `PKGBUILD` and
+   `.SRCINFO`, so the checksum is known before the tag.
 3. Merging the PR tags `vX.Y.Z` and creates a draft release. `main` already
    pins the right checksum.
 4. The same workflow rebuilds the tarball from the tag and checks it against
