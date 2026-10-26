@@ -1,0 +1,132 @@
+# Publishes the GitHub release asset that PKGBUILD downloads.
+#
+# PKGBUILD pins sha256sums to an uploaded tarball, not GitHub's on-the-fly
+# tag archive, because the uploaded file is a fixed byte string. This job
+# builds that tarball with `git archive`, proves the PKGBUILD builds and
+# packages from it in a clean Arch container, and only then publishes it.
+#
+# The checksum pin is the one manual step left. The job summary prints the
+# sha256 for the follow-up `build(pkgbuild): point at the vX.Y.Z release
+# asset` commit. Never pin before this job has published the asset.
+#
+# workflow_dispatch exists to publish an already-pushed tag, for example after
+# a failed run. It refuses to replace an existing release: users may already
+# have pinned that asset's checksum.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish (vX.Y.Z)
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build, verify and publish the release asset
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Validate tag name
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
+            exit 1
+          fi
+
+      - name: Install tools
+        run: pacman -Syu --noconfirm --needed git github-cli rust
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      # checkout can leave the tag lightweight. Refetch it so the annotation
+      # survives as release notes.
+      - name: Fetch the annotated tag
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+
+      - name: Check versions match the tag
+        run: |
+          ver=${TAG#v}
+          cargo_ver=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          pkg_ver=$(sed -n 's/^pkgver=//p' PKGBUILD)
+          echo "tag=$ver Cargo.toml=$cargo_ver PKGBUILD=$pkg_ver"
+          if [ "$cargo_ver" != "$ver" ] || [ "$pkg_ver" != "$ver" ]; then
+            echo "::error::Cargo.toml and PKGBUILD must both say $ver"
+            exit 1
+          fi
+          echo "VER=$ver" >> "$GITHUB_ENV"
+
+      - name: Refuse to replace an existing release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Delete it by hand if the asset was never pinned."
+            exit 1
+          fi
+
+      - name: Build the asset
+        run: |
+          mkdir dist
+          git archive --format=tar.gz --prefix="aurscan-$VER/" -o "dist/aurscan-$VER.tar.gz" "$TAG"
+          (cd dist && sha256sum "aurscan-$VER.tar.gz" > "aurscan-$VER.tar.gz.sha256")
+          cat "dist/aurscan-$VER.tar.gz.sha256"
+          echo "SHA=$(cut -d' ' -f1 "dist/aurscan-$VER.tar.gz.sha256")" >> "$GITHUB_ENV"
+
+      # makepkg finds the tarball next to the PKGBUILD and skips the download,
+      # so this tests the exact bytes about to be published.
+      - name: Build and package from the asset
+        run: |
+          useradd -m builder
+          mkdir /tmp/build
+          cp PKGBUILD aurscan.install "dist/aurscan-$VER.tar.gz" /tmp/build/
+          sed -i "s/^sha256sums=.*/sha256sums=('$SHA')/" /tmp/build/PKGBUILD
+          chown -R builder:builder /tmp/build
+          su builder -c 'cd /tmp/build && makepkg --noconfirm'
+          bsdtar -xOf /tmp/build/aurscan-"$VER"-*.pkg.tar.zst usr/bin/aurscan > /tmp/aurscan
+          chmod +x /tmp/aurscan
+          /tmp/aurscan --version | grep -qx "aurscan $VER"
+
+      - name: Publish
+        run: |
+          git for-each-ref "refs/tags/$TAG" --format='%(contents:body)' > notes.md
+          if [ -s notes.md ]; then
+            notes=(--notes-file notes.md)
+          else
+            notes=(--generate-notes)
+          fi
+          gh release create "$TAG" --verify-tag --title "aurscan $TAG" "${notes[@]}" \
+            "dist/aurscan-$VER.tar.gz" "dist/aurscan-$VER.tar.gz.sha256"
+
+      - name: Summary
+        run: |
+          {
+            echo "## aurscan $TAG published"
+            echo
+            echo "Pin this in PKGBUILD, regenerate .SRCINFO, then commit \`build(pkgbuild): point at the $TAG release asset\`:"
+            echo
+            echo '```'
+            echo "sha256sums=('$SHA')"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

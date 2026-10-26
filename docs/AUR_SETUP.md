@@ -99,10 +99,21 @@ Three gotchas are baked into those commands:
 
 ## Publishing an update
 
-The same loop minus setup. In the main repo, the release drill has already
-bumped `pkgver`, pinned `sha256sums` to the published asset, and regenerated
-`.SRCINFO` (see the `chore: release` / `build(pkgbuild)` commit pairs in git
-history for the pattern). Then:
+The same loop minus setup. In the main repo, the release drill is:
+
+1. Commit `chore: release vX.Y.Z`, bumping `version` in `Cargo.toml`,
+   `Cargo.lock` and `pkgver` in `PKGBUILD`.
+2. Push an annotated `vX.Y.Z` tag on it. The tag body becomes the release
+   notes.
+3. `.github/workflows/release.yml` runs on the tag push. It builds the
+   `git archive` tarball and runs `makepkg` against it in a clean Arch
+   container. Then it publishes the GitHub release and prints the sha256 in
+   the job summary. To publish a tag that's already pushed, run it by hand
+   with `gh workflow run release.yml -f tag=vX.Y.Z`.
+4. Pin that sha256 in `PKGBUILD`, regenerate `.SRCINFO`, and commit
+   `build(pkgbuild): point at the vX.Y.Z release asset`.
+
+Then:
 
 ```bash
 cd ~/aur-aurscan
