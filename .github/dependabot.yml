@@ -1,0 +1,30 @@
+# Keeps the pinned action SHAs and crates current. The cooldown skips
+# releases younger than two weeks, so a compromised or broken release has
+# time to be yanked before it lands here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+      include: scope
