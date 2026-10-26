@@ -104,18 +104,29 @@ drill from `.github/workflows/release.yml`:
 
 1. Every push to `main` updates a release PR. Conventional commit types pick
    the version bump. The PR bumps `Cargo.toml` and `PKGBUILD` (the
-   `x-release-please-version` marker) and updates `CHANGELOG.md`. A follow-up
-   job syncs `Cargo.lock` and `.SRCINFO` on the PR branch.
-2. Merging the PR tags `vX.Y.Z` and creates the GitHub release.
-3. The same workflow builds the `git archive` tarball and runs `makepkg`
-   against it in a clean Arch container. Then it uploads the tarball to the
-   release.
-4. It pushes `build(pkgbuild): point at the vX.Y.Z release asset` to `main`
-   with the pinned sha256.
+   `x-release-please-version` marker) and updates `CHANGELOG.md`.
+2. A follow-up job on the PR branch syncs `Cargo.lock` and pins the release
+   tarball's sha256 in `PKGBUILD`. Then it regenerates `.SRCINFO`. The
+   tarball is reproducible (`.github/scripts/release-tarball.sh`) and leaves
+   out `PKGBUILD` and `.SRCINFO`, so the checksum is known before the tag.
+3. Merging the PR tags `vX.Y.Z` and creates a draft release. `main` already
+   pins the right checksum.
+4. The same workflow rebuilds the tarball from the tag and checks it against
+   the pin. It runs `makepkg` on it in a clean Arch container, attests it,
+   uploads it and publishes the release.
 
-The repo setting *Allow GitHub Actions to create and approve pull requests*
-must be on, or step 1 fails. The bot's commits are made with `GITHUB_TOKEN`,
-so CI doesn't run on the release PR or on the pin commit.
+If something lands on `main` after release-please last refreshed the
+release PR, the tag's tree no longer matches the hashed tree. Step 4 then
+fails and the release stays a draft. The tag's own `PKGBUILD` carries the
+stale checksum, so a rerun can't fix it. Delete the draft release and land
+a `fix:` commit. release-please then opens the next patch release with a
+fresh checksum. The unreleased tag stays behind, like `v0.2.4`.
+
+`main` requires PRs and verified signatures. The sync job commits through
+the GraphQL `createCommitOnBranch` mutation, which GitHub signs. The repo
+setting *Allow GitHub Actions to create and approve pull requests* must be
+on, or step 1 fails. Without the optional GitHub App, the bot works as
+`GITHUB_TOKEN`, so CI doesn't run on the release PR.
 
 Then:
 

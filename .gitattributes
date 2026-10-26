@@ -1,0 +1,5 @@
+# The release tarball leaves these out so the PKGBUILD can pin the tarball's
+# own checksum. makepkg reads PKGBUILD and .SRCINFO from the package repo,
+# never from the tarball. See .github/scripts/release-tarball.sh.
+PKGBUILD export-ignore
+.SRCINFO export-ignore

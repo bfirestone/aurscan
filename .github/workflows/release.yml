@@ -2,22 +2,27 @@
 #
 # Every push to main updates the release PR. That PR bumps the version in
 # Cargo.toml and PKGBUILD and updates CHANGELOG.md. The sync job then
-# refreshes Cargo.lock and .SRCINFO, which release-please can't edit.
-# Merging the PR tags vX.Y.Z and creates a draft GitHub release.
+# refreshes Cargo.lock, pins the release tarball's sha256 in PKGBUILD and
+# regenerates .SRCINFO. Merging the PR tags vX.Y.Z and creates a draft
+# GitHub release, and main already carries the right checksum.
 #
-# The asset job builds the tarball that PKGBUILD downloads. It uses `git
-# archive` and runs makepkg on that tarball in a clean Arch container. The
-# publish job attests the tarball and uploads it to the draft. Then it
-# publishes the release and pushes the checksum pin to main. With release
-# immutability on, the published asset can't change after that. PKGBUILD
-# pins sha256sums to this uploaded tarball, not GitHub's on-the-fly tag
-# archive, because the uploaded file is a fixed byte string.
+# The checksum can be known before the tag exists because the tarball is
+# reproducible. .github/scripts/release-tarball.sh archives the tree with a
+# fixed mtime, and .gitattributes leaves PKGBUILD and .SRCINFO out of it, so
+# pinning the checksum doesn't change the bytes being checksummed.
 #
-# Bot pushes use a GitHub App token when RELEASE_APP_CLIENT_ID and
-# RELEASE_APP_PRIVATE_KEY are configured. Otherwise they fall back to
-# GITHUB_TOKEN, whose pushes don't trigger CI on the release PR or the pin
-# commit. Tags made with GITHUB_TOKEN don't trigger other workflows either,
-# which is why the asset jobs live here.
+# The asset job rebuilds the tarball from the tag, checks it against the pin
+# and runs makepkg on it in a clean Arch container. The publish job attests
+# the tarball, uploads it to the draft and publishes the release. With
+# release immutability on, the published asset can't change after that.
+#
+# main requires PRs and verified signatures, so the sync job commits through
+# the GraphQL API, which GitHub signs (.github/scripts/signed-commit.sh). It
+# uses a GitHub App token when RELEASE_APP_CLIENT_ID and
+# RELEASE_APP_PRIVATE_KEY are configured. Otherwise it falls back to
+# GITHUB_TOKEN, whose commits don't trigger CI on the release PR. Tags made
+# with GITHUB_TOKEN don't trigger other workflows either, which is why the
+# asset jobs live here.
 name: Release
 
 on:
@@ -62,16 +67,16 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # release-please bumps Cargo.toml and PKGBUILD but not the derived files.
-  # Without this, `cargo --locked` and the .SRCINFO consistency check fail
-  # on every release PR.
+  # release-please bumps Cargo.toml and PKGBUILD but can't compute the derived
+  # files. Without this, `cargo --locked`, the .SRCINFO consistency check and
+  # the asset's checksum check all fail on every release.
   release-pr-sync:
-    name: sync Cargo.lock and .SRCINFO on the release PR
+    name: sync Cargo.lock, checksum and .SRCINFO on the release PR
     needs: release-please
     if: needs.release-please.outputs.pr != ''
     runs-on: ubuntu-latest
     permissions:
-      contents: write # push to the release PR branch
+      contents: write # commit to the release PR branch
     env:
       PR_JSON: ${{ needs.release-please.outputs.pr }}
     steps:
@@ -95,15 +100,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.BRANCH }}
-          token: ${{ steps.app.outputs.token || github.token }}
-          # The push below needs the token. Nothing in this job builds code.
-          persist-credentials: true # zizmor: ignore[artipacked]
+          persist-credentials: false
 
       - name: Sync Cargo.lock
         run: cargo update --workspace
 
+      # The tag's tree will be this branch's tree after the fixup commit. The
+      # tarball excludes PKGBUILD and .SRCINFO, so staging Cargo.lock is
+      # enough to archive that tree before the commit exists.
+      - name: Pin the release tarball checksum
+        run: |
+          ver=$(sed -n 's/^pkgver=\([^ ]*\).*/\1/p' PKGBUILD)
+          git add Cargo.lock
+          .github/scripts/release-tarball.sh "$ver" "$(git write-tree)" "$RUNNER_TEMP/release.tar.gz"
+          sha=$(sha256sum "$RUNNER_TEMP/release.tar.gz" | cut -d' ' -f1)
+          echo "aurscan-$ver.tar.gz will hash to $sha"
+          sed -i "s/^sha256sums=.*/sha256sums=('$sha')/" PKGBUILD
+          grep -qx "sha256sums=('$sha')" PKGBUILD
+
       # makepkg --printsrcinfo sources the PKGBUILD, so it gets only the
-      # packaging files, mounted read-only and without the token in .git.
+      # packaging files, mounted read-only.
       - name: Regenerate .SRCINFO
         run: |
           docker run --rm \
@@ -113,17 +129,20 @@ jobs:
             bash -c 'useradd -m builder && cp -r /in /home/builder/b && chown -R builder:builder /home/builder/b && su builder -c "cd ~/b && makepkg --printsrcinfo"' \
             > .SRCINFO
 
-      - name: Push fixups to the release PR
+      # The release PR's commits land on main, which requires verified
+      # signatures, so the fixup goes through the API instead of git push.
+      - name: Commit fixups to the release PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          if git diff --quiet; then
-            echo "Cargo.lock and .SRCINFO already in sync."
+          mapfile -t changed < <(git diff --name-only HEAD)
+          if [ "${#changed[@]}" -eq 0 ]; then
+            echo "Cargo.lock, checksum and .SRCINFO already in sync."
             exit 0
           fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.lock .SRCINFO
-          git commit -m "chore: sync Cargo.lock and .SRCINFO"
-          git push origin "HEAD:$BRANCH"
+          .github/scripts/signed-commit.sh "$BRANCH" "$(git rev-parse HEAD)" \
+            "chore: sync Cargo.lock, checksum and .SRCINFO" "${changed[@]}"
 
   asset:
     name: build and verify the release asset
@@ -138,6 +157,9 @@ jobs:
       TAG: ${{ needs.release-please.outputs.tag_name }}
       VER: ${{ needs.release-please.outputs.version }}
     steps:
+      # git must be installed before checkout. Without it, checkout downloads
+      # GitHub's archive tarball, which honors .gitattributes export-ignore
+      # and so leaves out PKGBUILD and .SRCINFO.
       - name: Install tools
         run: pacman -Syu --noconfirm --needed git rust
 
@@ -157,22 +179,30 @@ jobs:
             exit 1
           fi
 
-      - name: Build the asset
+      # A mismatch means the tag's tree isn't the tree the sync job hashed.
+      # That happens when main moves after release-please last refreshed the
+      # release PR. The release stays a draft, so nothing broken ships.
+      - name: Build the asset and check it against the pin
         run: |
           mkdir dist
-          git archive --format=tar.gz --prefix="aurscan-$VER/" -o "dist/aurscan-$VER.tar.gz" "$TAG"
+          .github/scripts/release-tarball.sh "$VER" "$TAG" "dist/aurscan-$VER.tar.gz"
           (cd dist && sha256sum "aurscan-$VER.tar.gz" > "aurscan-$VER.tar.gz.sha256")
-          cat "dist/aurscan-$VER.tar.gz.sha256"
+          sha=$(cut -d' ' -f1 "dist/aurscan-$VER.tar.gz.sha256")
+          pinned=$(sed -n "s/^sha256sums=('\([0-9a-f]*\)')$/\1/p" PKGBUILD)
+          echo "built=$sha pinned=$pinned"
+          if [ "$sha" != "$pinned" ]; then
+            echo "::error::The $TAG tarball hashes to $sha but its PKGBUILD pins $pinned. The draft release was not published."
+            exit 1
+          fi
 
       # makepkg finds the tarball next to the PKGBUILD and skips the download,
-      # so this tests the exact bytes about to be published.
+      # so this tests the exact bytes about to be published against the
+      # PKGBUILD exactly as tagged.
       - name: Build and package from the asset
         run: |
-          sha=$(cut -d' ' -f1 "dist/aurscan-$VER.tar.gz.sha256")
           useradd -m builder
           mkdir /tmp/build
           cp PKGBUILD aurscan.install "dist/aurscan-$VER.tar.gz" /tmp/build/
-          sed -i "s/^sha256sums=.*/sha256sums=('$sha')/" /tmp/build/PKGBUILD
           chown -R builder:builder /tmp/build
           su builder -c 'cd /tmp/build && makepkg --noconfirm'
           bsdtar -xOf /tmp/build/aurscan-"$VER"-*.pkg.tar.zst usr/bin/aurscan > /tmp/aurscan
@@ -188,11 +218,11 @@ jobs:
   # Split from the asset job so makepkg, cargo and every dependency's build
   # script never run next to a write token or an OIDC signing token.
   publish:
-    name: attest, upload, publish and pin
+    name: attest, upload and publish
     needs: [release-please, asset]
     runs-on: ubuntu-latest
     permissions:
-      contents: write # upload the asset, publish the release, push the pin
+      contents: write # upload the asset and publish the release
       id-token: write # sign the provenance attestation
       attestations: write # store the provenance attestation
     env:
@@ -229,45 +259,6 @@ jobs:
           if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" = "true" ]; then
             gh release edit "$TAG" --draft=false --latest
           fi
-
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        id: app
-        if: vars.RELEASE_APP_CLIENT_ID != ''
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          permission-contents: write
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: main
-          path: repo
-          token: ${{ steps.app.outputs.token || github.token }}
-          # The push below needs the token. Nothing in this job builds code.
-          persist-credentials: true # zizmor: ignore[artipacked]
-
-      - name: Pin the checksum on main
-        working-directory: repo
-        run: |
-          sha=$(cut -d' ' -f1 "../dist/aurscan-$VER.tar.gz.sha256")
-          pkg_ver=$(sed -n 's/^pkgver=\([^ ]*\).*/\1/p' PKGBUILD)
-          if [ "$pkg_ver" != "$VER" ]; then
-            echo "::error::main's PKGBUILD says $pkg_ver, not $VER. Pin it by hand."
-            exit 1
-          fi
-          old=$(sed -n "s/^sha256sums=('\([0-9a-f]*\)')$/\1/p" PKGBUILD)
-          if [ "$old" = "$sha" ]; then
-            echo "PKGBUILD already pins $sha."
-            exit 0
-          fi
-          sed -i "s/$old/$sha/" PKGBUILD .SRCINFO
-          grep -qx "sha256sums=('$sha')" PKGBUILD
-          grep -qx "	sha256sums = $sha" .SRCINFO
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add PKGBUILD .SRCINFO
-          git commit -m "build(pkgbuild): point at the $TAG release asset"
-          git push origin HEAD:main
 
       - name: Summary
         run: |
