@@ -99,19 +99,23 @@ Three gotchas are baked into those commands:
 
 ## Publishing an update
 
-The same loop minus setup. In the main repo, the release drill is:
+The same loop minus setup. In the main repo, release-please runs the release
+drill from `.github/workflows/release.yml`:
 
-1. Commit `chore: release vX.Y.Z`, bumping `version` in `Cargo.toml`,
-   `Cargo.lock` and `pkgver` in `PKGBUILD`.
-2. Push an annotated `vX.Y.Z` tag on it. The tag body becomes the release
-   notes.
-3. `.github/workflows/release.yml` runs on the tag push. It builds the
-   `git archive` tarball and runs `makepkg` against it in a clean Arch
-   container. Then it publishes the GitHub release and prints the sha256 in
-   the job summary. To publish a tag that's already pushed, run it by hand
-   with `gh workflow run release.yml -f tag=vX.Y.Z`.
-4. Pin that sha256 in `PKGBUILD`, regenerate `.SRCINFO`, and commit
-   `build(pkgbuild): point at the vX.Y.Z release asset`.
+1. Every push to `main` updates a release PR. Conventional commit types pick
+   the version bump. The PR bumps `Cargo.toml` and `PKGBUILD` (the
+   `x-release-please-version` marker) and updates `CHANGELOG.md`. A follow-up
+   job syncs `Cargo.lock` and `.SRCINFO` on the PR branch.
+2. Merging the PR tags `vX.Y.Z` and creates the GitHub release.
+3. The same workflow builds the `git archive` tarball and runs `makepkg`
+   against it in a clean Arch container. Then it uploads the tarball to the
+   release.
+4. It pushes `build(pkgbuild): point at the vX.Y.Z release asset` to `main`
+   with the pinned sha256.
+
+The repo setting *Allow GitHub Actions to create and approve pull requests*
+must be on, or step 1 fails. The bot's commits are made with `GITHUB_TOKEN`,
+so CI doesn't run on the release PR or on the pin commit.
 
 Then:
 
