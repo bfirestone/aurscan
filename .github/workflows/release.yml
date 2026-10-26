@@ -40,9 +40,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    # GH_TOKEN is set only on the steps that call gh. makepkg runs cargo and
+    # every dependency's build script, which must never see a write token.
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
-      GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
       - name: Validate tag name
@@ -59,6 +60,7 @@ jobs:
         with:
           ref: ${{ env.TAG }}
           fetch-depth: 0
+          persist-credentials: false
 
       # checkout can leave the tag lightweight. Refetch it so the annotation
       # survives as release notes.
@@ -80,6 +82,8 @@ jobs:
           echo "VER=$ver" >> "$GITHUB_ENV"
 
       - name: Refuse to replace an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::Release $TAG already exists. Delete it by hand if the asset was never pinned."
@@ -109,6 +113,8 @@ jobs:
           /tmp/aurscan --version | grep -qx "aurscan $VER"
 
       - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git for-each-ref "refs/tags/$TAG" --format='%(contents:body)' > notes.md
           if [ -s notes.md ]; then
