@@ -1,6 +1,6 @@
 pkgbase = aurscan
 	pkgdesc = High-performance AUR package scanner with PKGBUILD and artifact malware detection
-	pkgver = 0.2.4
+	pkgver = 0.2.5
 	pkgrel = 1
 	url = https://github.com/bfirestone/aurscan
 	install = aurscan.install
@@ -13,7 +13,7 @@ pkgbase = aurscan
 	depends = gcc-libs
 	optdepends = paru: for paru-native PreBuildCommand integration
 	options = !lto
-	source = https://github.com/bfirestone/aurscan/releases/download/v0.2.4/aurscan-0.2.4.tar.gz
+	source = https://github.com/bfirestone/aurscan/releases/download/v0.2.5/aurscan-0.2.5.tar.gz
 	sha256sums = 2c964fda9ef78f1f9652767ec086a43b88d68459f5a88aef56cde4eebe065ea4
 
 pkgname = aurscan
