@@ -111,7 +111,8 @@ drill from `.github/workflows/release.yml`:
    against it in a clean Arch container. Then it uploads the tarball to the
    release.
 4. It opens `build(pkgbuild): point at the vX.Y.Z release asset` from a
-   `release-pin/vX.Y.Z` branch and squash-merges it.
+   `release-pin/vX.Y.Z` branch. Check the hash and squash-merge it. Until
+   then, `main`'s `PKGBUILD` points at the new asset with the old checksum.
 
 `main` requires PRs and verified signatures. The workflow makes its commits
 through the GraphQL `createCommitOnBranch` mutation, which GitHub signs. The

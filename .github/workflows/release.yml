@@ -8,7 +8,7 @@
 # The asset job builds the tarball that PKGBUILD downloads. It uses `git
 # archive` and runs makepkg on that tarball in a clean Arch container. The
 # publish job attests the tarball and uploads it to the draft. Then it
-# publishes the release and lands the checksum pin on main through a PR.
+# publishes the release and opens a PR with the checksum pin.
 # With release immutability on, the published asset can't change after
 # that. PKGBUILD pins sha256sums to this uploaded tarball, not GitHub's
 # on-the-fly tag archive, because the uploaded file is a fixed byte string.
@@ -196,7 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # upload the asset, publish the release, commit the pin
-      pull-requests: write # open and merge the pin PR
+      pull-requests: write # open the pin PR
       id-token: write # sign the provenance attestation
       attestations: write # store the provenance attestation
     env:
@@ -249,8 +249,8 @@ jobs:
           persist-credentials: false
 
       # main requires a PR and verified signatures. The pin goes on its own
-      # branch as an API commit, which GitHub signs. A squash merge then
-      # lands it on main as another GitHub-signed commit.
+      # branch as an API commit, which GitHub signs. A squash merge by a
+      # maintainer lands it on main as another GitHub-signed commit.
       - name: Pin the checksum through a PR
         working-directory: repo
         env:
@@ -278,13 +278,13 @@ jobs:
             gh api "repos/$GH_REPO/git/refs" -f ref="refs/heads/$pin" -f sha="$head" >/dev/null
             .github/scripts/signed-commit.sh "$pin" "$head" "$title" PKGBUILD .SRCINFO
           fi
+          # The ruleset requires a PR so a person sees what lands on main. The
+          # workflow opens the pin PR but leaves the merge to a maintainer.
           if [ "$(gh pr view "$pin" --json state -q .state 2>/dev/null)" != "OPEN" ]; then
             gh pr create --base main --head "$pin" --title "$title" \
-              --body "Pins \`sha256sums\` to the published $TAG asset: \`$sha\`."
+              --body "Pins \`sha256sums\` to the published $TAG asset: \`$sha\`. Check it with \`gh attestation verify aurscan-$VER.tar.gz -R $GH_REPO\`."
           fi
-          if ! gh pr merge "$pin" --squash --delete-branch; then
-            echo "::warning::The pin PR couldn't be merged automatically. Merge it by hand."
-          fi
+          echo "PIN_PR=$(gh pr view "$pin" --json url -q .url)" >> "$GITHUB_ENV"
 
       - name: Summary
         run: |
@@ -294,4 +294,6 @@ jobs:
             echo "Asset sha256: \`$(cut -d' ' -f1 "dist/aurscan-$VER.tar.gz.sha256")\`"
             echo
             echo "Verify provenance: \`gh attestation verify aurscan-$VER.tar.gz -R $GH_REPO\`"
+            echo
+            echo "Checksum pin PR, waiting for a maintainer to merge: ${PIN_PR:-none needed}"
           } >> "$GITHUB_STEP_SUMMARY"
