@@ -34,7 +34,8 @@ options=('!lto')
 # tarballs are generated on demand rather than stored, and a 2023 change to
 # GitHub's tar/gzip settings silently altered their checksums, breaking
 # PKGBUILDs across several distros. An uploaded asset is a fixed byte string.
-# Rebuild it with: git archive --format=tar.gz --prefix=$pkgname-$pkgver/ v$pkgver
+# Rebuild it with: .github/scripts/release-tarball.sh $pkgver v$pkgver out.tar.gz
+# The tarball leaves out this file, so the release PR can pin its checksum.
 source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
 sha256sums=('d971d78ba90dd562e0e5882f134ea76c0d58e411f4609640eb0de62adbfb7571')
 
