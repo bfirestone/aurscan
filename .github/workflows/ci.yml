@@ -78,12 +78,15 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
+      # git must be installed before checkout. Without it, checkout downloads
+      # GitHub's archive tarball, which honors .gitattributes export-ignore
+      # and so leaves out PKGBUILD and .SRCINFO.
+      - name: Install packaging tools
+        run: pacman -Syu --noconfirm --needed git pacman-contrib namcap
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Install packaging tools
-        run: pacman -Syu --noconfirm --needed pacman-contrib namcap
 
       # makepkg refuses to run as root.
       - name: Create build user

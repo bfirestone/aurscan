@@ -157,6 +157,9 @@ jobs:
       TAG: ${{ needs.release-please.outputs.tag_name }}
       VER: ${{ needs.release-please.outputs.version }}
     steps:
+      # git must be installed before checkout. Without it, checkout downloads
+      # GitHub's archive tarball, which honors .gitattributes export-ignore
+      # and so leaves out PKGBUILD and .SRCINFO.
       - name: Install tools
         run: pacman -Syu --noconfirm --needed git rust
 
