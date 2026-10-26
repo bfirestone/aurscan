@@ -1,6 +1,6 @@
 # Maintainer: Ben Firestone <ben.firestone@gmail.com>
 pkgname=aurscan
-pkgver=0.2.5 # x-release-please-version
+pkgver=0.2.6 # x-release-please-version
 pkgrel=1
 pkgdesc="High-performance AUR package scanner with PKGBUILD and artifact malware detection"
 arch=('x86_64')
@@ -38,7 +38,7 @@ options=('!lto')
 #   .github/scripts/release-tarball.sh $pkgver v$pkgver out.tar.gz
 # The tarball leaves out this file, so the release PR can pin its checksum.
 source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('d971d78ba90dd562e0e5882f134ea76c0d58e411f4609640eb0de62adbfb7571')
+sha256sums=('74914faddd001e92f259042b68732756a8c216a7d7f68a6c8ae5a37c76500476')
 
 build() {
 	cd "$pkgname-$pkgver"
