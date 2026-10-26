@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     permissions:
-      contents: write
+      contents: write # gh release create
     defaults:
       run:
         shell: bash
