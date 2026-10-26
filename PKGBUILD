@@ -1,6 +1,6 @@
 # Maintainer: Ben Firestone <ben.firestone@gmail.com>
 pkgname=aurscan
-pkgver=0.2.5 # x-release-please-version
+pkgver=0.2.6 # x-release-please-version
 pkgrel=1
 pkgdesc="High-performance AUR package scanner with PKGBUILD and artifact malware detection"
 arch=('x86_64')
