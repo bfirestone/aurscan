@@ -3,6 +3,7 @@ name = "aurscan-detectors"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 
 [dependencies]
 aurscan-core = { path = "../aurscan-core" }

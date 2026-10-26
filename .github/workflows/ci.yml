@@ -11,9 +11,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Incremental artifacts never get reused on a fresh runner.
+  CARGO_INCREMENTAL: 0
 
 jobs:
   # Rust gate. Runs on ubuntu because the test suite is hermetic — every test
@@ -29,15 +35,7 @@ jobs:
       - name: Install toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
 
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Format
         run: cargo fmt --all --check
@@ -49,6 +47,19 @@ jobs:
       # makepkg, where build() also passes --locked.
       - name: Test
         run: cargo test --workspace --locked
+
+  # Supply-chain gate: RustSec advisories, licenses, wildcard deps and
+  # registry sources, as configured in deny.toml.
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features --workspace
 
   # Packaging gate. .SRCINFO is generated metadata that the AUR reads *instead
   # of* parsing the PKGBUILD, so the two silently diverging is the classic AUR
