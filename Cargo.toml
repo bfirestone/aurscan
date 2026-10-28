@@ -24,7 +24,7 @@ tree-sitter = "0.26"
 tree-sitter-bash = "0.25"
 goblin = "0.10"
 tar = "0.4"
-zstd = "0.13"
+zstd = "0.14"
 ureq = { version = "2", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
