@@ -28,5 +28,5 @@ zstd = "0.13"
 ureq = { version = "2", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
-dirs = "5"
+dirs = "7"
 tempfile = "3"
